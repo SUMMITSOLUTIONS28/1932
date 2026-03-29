@@ -1,0 +1,1104 @@
+yaml
+name: Build Advanced Astranetworks WiFi Hotspot APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.0'
+
+      - name: Create project files
+        run: |
+          # Create directory structure
+          mkdir -p app/src/main/java/com/advanced/wifi
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+
+          # ==================== MainActivity.java ====================
+          cat > app/src/main/java/com/advanced/wifi/MainActivity.java << 'EOF'
+          package com.advanced.wifi;
+
+          import android.Manifest;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.net.wifi.SoftApConfiguration;
+          import android.net.wifi.WifiManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.widget.Button;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+
+          public class MainActivity extends AppCompatActivity {
+              private static final int PERMISSION_REQUEST_CODE = 100;
+              private WifiManager wifiManager;
+              private TextView statusText, connectedCountText, earningsText;
+              private Button startHotspotButton, stopHotspotButton, viewDashboardButton;
+              private boolean hotspotActive = false;
+              private SharedPreferences prefs;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+
+                  wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                  prefs = getSharedPreferences("wifi_hotspot", MODE_PRIVATE);
+
+                  statusText = findViewById(R.id.statusText);
+                  connectedCountText = findViewById(R.id.connectedCountText);
+                  earningsText = findViewById(R.id.earningsText);
+                  startHotspotButton = findViewById(R.id.startHotspotButton);
+                  stopHotspotButton = findViewById(R.id.stopHotspotButton);
+                  viewDashboardButton = findViewById(R.id.viewDashboardButton);
+
+                  checkPermissions();
+                  updateEarningsDisplay();
+
+                  startHotspotButton.setOnClickListener(v -> startHotspot());
+                  stopHotspotButton.setOnClickListener(v -> stopHotspot());
+                  viewDashboardButton.setOnClickListener(v -> {
+                      Intent intent = new Intent(this, DashboardActivity.class);
+                      startActivity(intent);
+                  });
+              }
+
+              private void checkPermissions() {
+                  String[] permissions;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      permissions = new String[]{
+                          Manifest.permission.READ_SMS,
+                          Manifest.permission.RECEIVE_SMS,
+                          Manifest.permission.INTERNET,
+                          Manifest.permission.ACCESS_WIFI_STATE,
+                          Manifest.permission.CHANGE_WIFI_STATE,
+                          Manifest.permission.NEARBY_WIFI_DEVICES,
+                          Manifest.permission.FOREGROUND_SERVICE
+                      };
+                  } else {
+                      permissions = new String[]{
+                          Manifest.permission.READ_SMS,
+                          Manifest.permission.RECEIVE_SMS,
+                          Manifest.permission.INTERNET,
+                          Manifest.permission.ACCESS_WIFI_STATE,
+                          Manifest.permission.CHANGE_WIFI_STATE,
+                          Manifest.permission.ACCESS_FINE_LOCATION,
+                          Manifest.permission.FOREGROUND_SERVICE
+                      };
+                  }
+
+                  boolean allGranted = true;
+                  for (String perm : permissions) {
+                      if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+                          allGranted = false;
+                          break;
+                      }
+                  }
+
+                  if (!allGranted) {
+                      ActivityCompat.requestPermissions(this, permissions, PERMISSION_REQUEST_CODE);
+                  } else {
+                      startBackgroundServices();
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  if (requestCode == PERMISSION_REQUEST_CODE) {
+                      boolean allGranted = true;
+                      for (int result : grantResults) {
+                          if (result != PackageManager.PERMISSION_GRANTED) {
+                              allGranted = false;
+                              break;
+                          }
+                      }
+                      if (allGranted) {
+                          startBackgroundServices();
+                          Toast.makeText(this, "All permissions granted", Toast.LENGTH_SHORT).show();
+                      } else {
+                          Toast.makeText(this, "Permissions required for app to work", Toast.LENGTH_LONG).show();
+                      }
+                  }
+              }
+
+              private void startBackgroundServices() {
+                  Intent hotspotIntent = new Intent(this, HotspotService.class);
+                  Intent webServerIntent = new Intent(this, WebServerService.class);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      startForegroundService(hotspotIntent);
+                      startForegroundService(webServerIntent);
+                  } else {
+                      startService(hotspotIntent);
+                      startService(webServerIntent);
+                  }
+              }
+
+              private void startHotspot() {
+                  if (hotspotActive) {
+                      Toast.makeText(this, "Hotspot already active", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      String password = generatePassword();
+                      SoftApConfiguration config = new SoftApConfiguration.Builder()
+                          .setSsid("Advanced_astranetworks")
+                          .setPassphrase(password, SoftApConfiguration.SECURITY_TYPE_WPA2_PSK)
+                          .setMaxNumberOfClients(10)
+                          .build();
+                      
+                      wifiManager.setSoftApConfiguration(config);
+                      hotspotActive = true;
+                      statusText.setText("Hotspot: ACTIVE");
+                      statusText.setTextColor(0xFF00FF00);
+                      
+                      // Save password
+                      prefs.edit().putString("hotspot_password", password).apply();
+                      
+                      Toast.makeText(this, "Hotspot 'Advanced_astranetworks' started\nPassword: " + password, Toast.LENGTH_LONG).show();
+                  } else {
+                      Toast.makeText(this, "Android 10+ required", Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private String generatePassword() {
+                  String chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+                  StringBuilder password = new StringBuilder();
+                  for (int i = 0; i < 8; i++) {
+                      int index = (int) (Math.random() * chars.length());
+                      password.append(chars.charAt(index));
+                  }
+                  return password.toString();
+              }
+
+              private void stopHotspot() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      SoftApConfiguration config = new SoftApConfiguration.Builder()
+                          .setSsid("Advanced_astranetworks")
+                          .setPassphrase("", SoftApConfiguration.SECURITY_TYPE_OPEN)
+                          .build();
+                      wifiManager.setSoftApConfiguration(config);
+                  }
+                  hotspotActive = false;
+                  statusText.setText("Hotspot: INACTIVE");
+                  statusText.setTextColor(0xFFFF0000);
+                  Toast.makeText(this, "Hotspot stopped", Toast.LENGTH_SHORT).show();
+              }
+
+              private void updateEarningsDisplay() {
+                  int earnings = prefs.getInt("total_earnings", 0);
+                  earningsText.setText("Total Earnings: " + earnings + " KSH");
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateEarningsDisplay();
+                  if (hotspotActive) {
+                      statusText.setText("Hotspot: ACTIVE");
+                      statusText.setTextColor(0xFF00FF00);
+                  }
+              }
+          }
+          EOF
+
+          # ==================== HotspotService.java ====================
+          cat > app/src/main/java/com/advanced/wifi/HotspotService.java << 'EOF'
+          package com.advanced.wifi;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.database.Cursor;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.telephony.SmsManager;
+          import android.widget.Toast;
+          import androidx.core.app.NotificationCompat;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.net.URLEncoder;
+          import java.util.HashMap;
+          import java.util.Map;
+          import java.util.Timer;
+          import java.util.TimerTask;
+
+          public class HotspotService extends Service {
+              private SharedPreferences prefs;
+              private Map<String, UserData> activeUsers = new HashMap<>();
+              private Map<String, UserData> disconnectedUsers = new HashMap<>();
+              private Timer expiryTimer;
+              private Handler mainHandler = new Handler(Looper.getMainLooper());
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  prefs = getSharedPreferences("wifi_hotspot", MODE_PRIVATE);
+                  
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                  if (nm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel channel = new NotificationChannel("hotspot_service", "Hotspot Service", NotificationManager.IMPORTANCE_LOW);
+                      nm.createNotificationChannel(channel);
+                  }
+                  
+                  Notification notification = new NotificationCompat.Builder(this, "hotspot_service")
+                      .setContentTitle("Advanced Astranetworks")
+                      .setContentText("WiFi Hotspot is running")
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .build();
+                  startForeground(2, notification);
+                  
+                  loadUsersFromPrefs();
+                  startExpiryChecker();
+              }
+
+              private void loadUsersFromPrefs() {
+                  // Load active users
+                  String activeUsersJson = prefs.getString("active_users", "{}");
+                  // Load disconnected users with paused time
+                  String disconnectedUsersJson = prefs.getString("disconnected_users", "{}");
+              }
+
+              private void startExpiryChecker() {
+                  expiryTimer = new Timer();
+                  expiryTimer.scheduleAtFixedRate(new TimerTask() {
+                      @Override
+                      public void run() {
+                          checkExpiredUsers();
+                      }
+                  }, 0, 10000);
+              }
+
+              private void checkExpiredUsers() {
+                  long now = System.currentTimeMillis();
+                  Map<String, UserData> updatedActive = new HashMap<>();
+                  
+                  for (Map.Entry<String, UserData> entry : activeUsers.entrySet()) {
+                      if (entry.getValue().expiryTime <= now) {
+                          // User expired
+                          entry.getValue().status = "EXPIRED";
+                          saveToPrefs("expired_" + entry.getKey(), String.valueOf(now));
+                      } else {
+                          updatedActive.put(entry.getKey(), entry.getValue());
+                      }
+                  }
+                  activeUsers = updatedActive;
+                  saveActiveUsersToPrefs();
+              }
+
+              public void verifyAndConnect(String userMessage, String userDeviceId, double hours, int priceKsh, String durationDisplay) {
+                  new Thread(() -> {
+                      try {
+                          Thread.sleep(2000);
+                          
+                          // Check if message already used
+                          String usedMessages = prefs.getString("used_messages", "");
+                          if (usedMessages.contains(userMessage.substring(0, Math.min(50, userMessage.length())))) {
+                              mainHandler.post(() -> sendSmsToUser(userDeviceId, "⚠️ This M-PESA message has already been used. Please use a new payment."));
+                              return;
+                          }
+                             // Read last 10 SMS
+                          String lastSms = getLast10SmsMessages();
+                          
+                          if (lastSms.contains(userMessage.substring(0, Math.min(100, userMessage.length())))) {
+                              // Extract phone number
+                              String phoneNumber = extractPhoneNumber(userMessage);
+                              if (phoneNumber == null) phoneNumber = userDeviceId;
+                              
+                              // Add user
+                              long expiryTime = System.currentTimeMillis() + (long)(hours * 60 * 60 * 1000);
+                              UserData user = new UserData(phoneNumber, expiryTime, priceKsh, hours, durationDisplay, System.currentTimeMillis(), 0, "CONNECTED");
+                              activeUsers.put(phoneNumber, user);
+                              
+                              // Save used message
+                              String newUsedMessages = usedMessages + "|" + userMessage.substring(0, Math.min(50, userMessage.length()));
+                              prefs.edit().putString("used_messages", newUsedMessages).apply();
+                              
+                              // Update earnings
+                              int totalEarnings = prefs.getInt("total_earnings", 0);
+                              totalEarnings += priceKsh;
+                              prefs.edit().putInt("total_earnings", totalEarnings).apply();
+                              
+                              // Update total purchased time
+                              float totalPurchasedHours = prefs.getFloat("total_purchased_hours", 0);
+                              totalPurchasedHours += hours;
+                              prefs.edit().putFloat("total_purchased_hours", totalPurchasedHours).apply();
+                              
+                              saveActiveUsersToPrefs();
+                              
+                              mainHandler.post(() -> {
+                                  sendSmsToUser(phoneNumber, "✅ CONNECTED SUCCESSFULLY!\n\nPlan: " + durationDisplay + "\nAmount: " + priceKsh + " KSH\n\nYou may now browse the internet.");
+                                  Toast.makeText(HotspotService.this, "User " + phoneNumber + " connected", Toast.LENGTH_SHORT).show();
+                              });
+                          } else {
+                              mainHandler.post(() -> {
+                                  sendSmsToUser(userDeviceId, "❌ VERIFICATION FAILED\n\nPayment not found. Please ensure you sent the correct amount to 0798688920 and paste the full M-PESA message.\n\nContact support on WhatsApp: https://wa.me/254798688920");
+                              });
+                          }
+                      } catch (Exception e) {
+                          e.printStackTrace();
+                      }
+                  }).start();
+              }
+
+              private String getLast10SmsMessages() {
+                  StringBuilder result = new StringBuilder();
+                  Cursor cursor = null;
+                  try {
+                      cursor = getContentResolver().query(
+                          Uri.parse("content://sms/inbox"),
+                          null, null, null, "date DESC");
+                      
+                      if (cursor != null && cursor.moveToFirst()) {
+                          int bodyIdx = cursor.getColumnIndex("body");
+                          int count = 0;
+                          do {
+                              if (bodyIdx != -1) {
+                                  result.append(cursor.getString(bodyIdx)).append("\n");
+                              }
+                              count++;
+                          } while (cursor.moveToNext() && count < 10);
+                      }
+                  } catch (SecurityException e) {
+                      e.printStackTrace();
+                  } finally {
+                      if (cursor != null) cursor.close();
+                  }
+                  return result.toString();
+              }
+
+              private String extractPhoneNumber(String message) {
+                  java.util.regex.Pattern p = java.util.regex.Pattern.compile("07[0-9]{8}");
+                  java.util.regex.Matcher m = p.matcher(message);
+                  if (m.find()) {
+                      return m.group();
+                  }
+                  return null;
+              }
+
+              private void sendSmsToUser(String phoneNumber, String message) {
+                  try {
+                      SmsManager smsManager = SmsManager.getDefault();
+                      smsManager.sendTextMessage(phoneNumber, null, message, null, null);
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+              }
+
+              private void saveActiveUsersToPrefs() {
+                  // Save for persistence
+              }
+
+              private void saveToPrefs(String key, String value) {
+                  prefs.edit().putString(key, value).apply();
+              }
+
+              public void disconnectDevice(String phoneNumber) {
+                  if (activeUsers.containsKey(phoneNumber)) {
+                      UserData user = activeUsers.get(phoneNumber);
+                      user.status = "DISCONNECTED";
+                      user.pausedTime = System.currentTimeMillis();
+                      disconnectedUsers.put(phoneNumber, user);
+                      activeUsers.remove(phoneNumber);
+                      saveActiveUsersToPrefs();
+                  }
+              }
+
+              public void reconnectDevice(String phoneNumber) {
+                  if (disconnectedUsers.containsKey(phoneNumber)) {
+                      UserData user = disconnectedUsers.get(phoneNumber);
+                      long elapsedPaused = System.currentTimeMillis() - user.pausedTime;
+                      user.expiryTime += elapsedPaused;
+                      user.status = "CONNECTED";
+                      activeUsers.put(phoneNumber, user);
+                      disconnectedUsers.remove(phoneNumber);
+                      saveActiveUsersToPrefs();
+                  }
+              }
+
+              public void disconnectAllDevices() {
+                  for (Map.Entry<String, UserData> entry : activeUsers.entrySet()) {
+                      entry.getValue().status = "DISCONNECTED";
+                      entry.getValue().pausedTime = System.currentTimeMillis();
+                      disconnectedUsers.put(entry.getKey(), entry.getValue());
+                  }
+                  activeUsers.clear();
+                  saveActiveUsersToPrefs();
+              }
+
+              public void reconnectAllDevices() {
+                  for (Map.Entry<String, UserData> entry : disconnectedUsers.entrySet()) {
+                      long elapsedPaused = System.currentTimeMillis() - entry.getValue().pausedTime;
+                      entry.getValue().expiryTime += elapsedPaused;
+                      entry.getValue().status = "CONNECTED";
+                      activeUsers.put(entry.getKey(), entry.getValue());
+                  }
+                  disconnectedUsers.clear();
+                  saveActiveUsersToPrefs();
+              }
+
+              public Map<String, UserData> getActiveUsers() { return activeUsers; }
+              public Map<String, UserData> getDisconnectedUsers() { return disconnectedUsers; }
+
+              @Override
+              public void onDestroy() {
+                  super.onDestroy();
+                  if (expiryTimer != null) expiryTimer.cancel();
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              private class UserData {
+                  String phoneNumber;
+                  long expiryTime;
+                  int pricePaid;
+                  double hoursPurchased;
+                  String durationDisplay;
+                  long connectedAt;
+                  long pausedTime;
+                  String status;
+                  
+                  UserData(String phoneNumber, long expiryTime, int pricePaid, double hoursPurchased, String durationDisplay, long connectedAt, long pausedTime, String status) {
+                      this.phoneNumber = phoneNumber;
+                      this.expiryTime = expiryTime;
+                      this.pricePaid = pricePaid;
+                      this.hoursPurchased = hoursPurchased;
+                      this.durationDisplay = durationDisplay;
+                      this.connectedAt = connectedAt;
+                      this.pausedTime = pausedTime;
+                      this.status = status;
+                  }
+              }
+          }
+          EOF
+
+          # ==================== DashboardActivity.java ====================
+          cat > app/src/main/java/com/advanced/wifi/DashboardActivity.java << 'EOF'
+          package com.advanced.wifi;
+
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import androidx.appcompat.app.AppCompatActivity;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+          import java.util.Map;
+
+          public class DashboardActivity extends AppCompatActivity {
+              private SharedPreferences prefs;
+              private LinearLayout connectedContainer, disconnectedContainer;
+              private TextView totalEarningsText, totalPurchasedTimeText;
+              private Button disconnectAllButton, connectAllButton;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  
+                  ScrollView scrollView = new ScrollView(this);
+                  LinearLayout mainLayout = new LinearLayout(this);
+                  mainLayout.setOrientation(LinearLayout.VERTICAL);
+                  mainLayout.setPadding(40, 40, 40, 40);
+                  
+                  prefs = getSharedPreferences("wifi_hotspot", MODE_PRIVATE);
+                  
+                  // Title
+                  TextView title = new TextView(this);
+                  title.setText("ADVANCED ASTRANETWORKS DASHBOARD");
+                  title.setTextSize(18);
+                  title.setPadding(0, 0, 0, 30);
+                  mainLayout.addView(title);
+                  
+                  // Master Switch Section
+                  TextView masterTitle = new TextView(this);
+                  masterTitle.setText("🔘 MASTER CONTROLS");
+                  masterTitle.setTextSize(16);
+                  masterTitle.setPadding(0, 0, 0, 15);
+                  mainLayout.addView(masterTitle);
+                  
+                  LinearLayout masterButtons = new LinearLayout(this);
+                  masterButtons.setOrientation(LinearLayout.HORIZONTAL);
+                  
+                  disconnectAllButton = new Button(this);
+                  disconnectAllButton.setText("DISCONNECT ALL");
+                  disconnectAllButton.setBackgroundColor(0xFFD32F2F);
+                  disconnectAllButton.setOnClickListener(v -> {
+                      Toast.makeText(this, "All devices disconnected. Time paused.", Toast.LENGTH_SHORT).show();
+                  });
+                  
+                  connectAllButton = new Button(this);
+                  connectAllButton.setText("CONNECT ALL");
+                  connectAllButton.setBackgroundColor(0xFF00C853);
+                  connectAllButton.setOnClickListener(v -> {
+                      Toast.makeText(this, "All devices reconnected. Time resumed.", Toast.LENGTH_SHORT).show();
+                  });
+                  
+                  masterButtons.addView(disconnectAllButton);
+                  masterButtons.addView(connectAllButton);
+                  mainLayout.addView(masterButtons);
+                  
+                  TextView info = new TextView(this);
+                  info.setText("⚠️ Time pauses when disconnected\n⏱️ Time resumes when reconnected");
+                  info.setTextSize(12);
+                  info.setPadding(0, 20, 0, 30);
+                  mainLayout.addView(info);
+                  
+                  // Statistics
+                  TextView statsTitle = new TextView(this);
+                  statsTitle.setText("📊 STATISTICS");
+                  statsTitle.setTextSize(16);
+                  statsTitle.setPadding(0, 0, 0, 15);
+                  mainLayout.addView(statsTitle);
+                  
+                  int totalEarnings = prefs.getInt("total_earnings", 0);
+                  float totalPurchasedHours = prefs.getFloat("total_purchased_hours", 0);
+                  
+                  totalEarningsText = new TextView(this);
+                  totalEarningsText.setText("💰 Total Earnings: " + totalEarnings + " KSH");
+                  totalEarningsText.setPadding(0, 5, 0, 5);
+                  mainLayout.addView(totalEarningsText);
+                  
+                  totalPurchasedTimeText = new TextView(this);
+                  totalPurchasedTimeText.setText("⏱️ Total Time Purchased: " + formatHours(totalPurchasedHours));
+                  totalPurchasedTimeText.setPadding(0, 5, 0, 30);
+                  mainLayout.addView(totalPurchasedTimeText);
+                  
+                  // Connected Devices Section
+                  TextView connectedTitle = new TextView(this);
+                  connectedTitle.setText("📱 CONNECTED DEVICES");
+                  connectedTitle.setTextSize(16);
+                  connectedTitle.setPadding(0, 0, 0, 15);
+                  mainLayout.addView(connectedTitle);
+                  
+                  connectedContainer = new LinearLayout(this);
+                  connectedContainer.setOrientation(LinearLayout.VERTICAL);
+                  mainLayout.addView(connectedContainer);
+                  
+                  // Disconnected Devices Section
+                  TextView disconnectedTitle = new TextView(this);
+                  disconnectedTitle.setText("📱 DISCONNECTED DEVICES (Time Paused)");
+                  disconnectedTitle.setTextSize(16);
+                  disconnectedTitle.setPadding(0, 30, 0, 15);
+                  mainLayout.addView(disconnectedTitle);
+                  
+                  disconnectedContainer = new LinearLayout(this);
+                  disconnectedContainer.setOrientation(LinearLayout.VERTICAL);
+                  mainLayout.addView(disconnectedContainer);
+                  
+                  scrollView.addView(mainLayout);
+                  setContentView(scrollView);
+                  
+                  loadDashboardData();
+              }
+              
+              private void loadDashboardData() {
+                  connectedContainer.removeAllViews();
+                  disconnectedContainer.removeAllViews();
+                  
+                  // Sample data - in production, this would come from HotspotService
+                  TextView sampleConnected = new TextView(this);
+                  sampleConnected.setText("📱 0712345678\n├─ Paid: 8 KSH\n├─ Purchased: 2hrs 15mins\n├─ Time Used: 45mins\n├─ Time Remaining: 1hr 30mins\n├─ Status: CONNECTED\n└─ [ DISCONNECT ]");
+                  sampleConnected.setPadding(20, 10, 20, 10);
+                  sampleConnected.setBackgroundColor(0xFF2D2D2D);
+                  sampleConnected.setPadding(20, 20, 20, 20);
+                  connectedContainer.addView(sampleConnected);
+                  
+                  TextView sampleDisconnected = new TextView(this);
+                  sampleDisconnected.setText("📱 0711122233\n├─ Paid: 900 KSH\n├─ Purchased: 3 months\n├─ Time Used: 12 days\n├─ Time Remaining: 78 days\n├─ Status: DISCONNECTED\n└─ [ CONNECT ]");
+                  sampleDisconnected.setPadding(20, 10, 20, 10);
+                  sampleDisconnected.setBackgroundColor(0xFF2D2D2D);
+                  sampleDisconnected.setPadding(20, 20, 20, 20);
+                  disconnectedContainer.addView(sampleDisconnected);
+              }
+              
+              private String formatHours(float hours) {
+                  if (hours < 24) {
+                      return (int)hours + " hours";
+                  } else if (hours < 720) {
+                      return (int)(hours / 24) + " days";
+                  } else {
+                      return (int)(hours / 720) + " months";
+                  }
+              }
+          }
+          EOF
+          
+          # ==================== WebServerService.java ====================
+          cat > app/src/main/java/com/advanced/wifi/WebServerService.java << 'EOF'
+          package com.advanced.wifi;
+
+          import android.app.Service;
+          import android.content.Intent;
+          import android.os.IBinder;
+          import com.sun.net.httpserver.HttpServer;
+          import com.sun.net.httpserver.HttpHandler;
+          import com.sun.net.httpserver.HttpExchange;
+          import java.io.IOException;
+          import java.io.OutputStream;
+          import java.net.InetSocketAddress;
+          import java.nio.charset.StandardCharsets;
+
+          public class WebServerService extends Service {
+              private HttpServer server;
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  startWebServer();
+              }
+
+              private void startWebServer() {
+                  new Thread(() -> {
+                      try {
+                          server = HttpServer.create(new InetSocketAddress(8080), 0);
+                          server.createContext("/", new CaptivePortalHandler());
+                          server.setExecutor(null);
+                          server.start();
+                      } catch (IOException e) {
+                          e.printStackTrace();
+                      }
+                  }).start();
+              }
+
+              private class CaptivePortalHandler implements HttpHandler {
+                  @Override
+                  public void handle(HttpExchange exchange) throws IOException {
+                      String html = getCaptivePortalHtml();
+                      exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
+                      exchange.sendResponseHeaders(200, html.getBytes(StandardCharsets.UTF_8).length);
+                      OutputStream os = exchange.getResponseBody();
+                      os.write(html.getBytes(StandardCharsets.UTF_8));
+                      os.close();
+                  }
+              }
+
+              private String getCaptivePortalHtml() {
+                  return "<!DOCTYPE html>\n" +
+                  "<html>\n" +
+                  "<head>\n" +
+                  "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
+                  "    <title>Advanced Astranetworks</title>\n" +
+                  "    <style>\n" +
+                  "        * { margin: 0; padding: 0; box-sizing: border-box; }\n" +
+                  "        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; padding: 20px; }\n" +
+                  "        .container { max-width: 600px; margin: 0 auto; }\n" +
+                  "        .header { background: linear-gradient(135deg, #e94560, #ff6b6b); padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 20px; color: white; }\n" +
+                  "        .trust-badge { background: rgba(255,255,255,0.2); padding: 8px 15px; border-radius: 50px; display: inline-block; margin-top: 10px; font-size: 12px; }\n" +
+                  "        .plans { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }\n" +
+                  "        .plan-card { background: white; border-radius: 15px; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: transform 0.2s; }\n" +
+                  "        .plan-card:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(0,0,0,0.2); }\n" +
+                  "        .plan-info h3 { font-size: 18px; color: #333; }\n" +
+                  "        .plan-info p { color: #666; font-size: 12px; margin-top: 5px; }\n" +
+                  "        .plan-price .price { font-size: 24px; font-weight: bold; color: #e94560; }\n" +
+                  "        .payment-section { background: white; border-radius: 15px; padding: 20px; margin-bottom: 20px; display: none; }\n" +
+                  "        .payment-number { background: #f0f0f0; padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 15px; }\n" +
+                  "        .payment-number .number { font-size: 28px; font-weight: bold; color: #e94560; letter-spacing: 2px; }\n" +
+                  "        textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 10px; margin-bottom: 15px; font-family: monospace; font-size: 12px; resize: vertical; }\n" +
+                  "        .submit-btn { background: linear-gradient(135deg, #e94560, #ff6b6b); color: white; border: none; padding: 15px; border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%; }\n" +
+                  "        .support-buttons { display: flex; gap: 10px; margin-top: 20px; }\n" +
+                  "        .support-btn { flex: 1; padding: 12px; border-radius: 10px; text-align: center; text-decoration: none; font-weight: bold; }\n" +
+                  "        .whatsapp { background: #25D366; color: white; }\n" +
+                  "        .facebook { background: #1877F2; color: white; }\n" +
+                  "        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #e94560; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; display: none; }\n" +
+                  "        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }\n" +
+                  "        .status { margin-top: 15px; padding: 10px; border-radius: 10px; display: none; text-align: center; }\n" +
+                  "        .status.success { background: #d4edda; color: #155724; display: block; }\n" +
+                  "        .status.error { background: #f8d7da; color: #721c24; display: block; }\n" +
+                  "    </style>\n" +
+                  "</head>\n" +
+                  "<body>\n" +
+                  "    <div class=\"container\">\n" +
+                  "        <div class=\"header\">\n" +
+                  "            <h1>🌐 Advanced Astranetworks</h1>\n" +
+                  "            <div class=\"trust-badge\">✓ TRUSTED WI-FI SOURCE ✓ SECURE CONNECTION</div>\n" +
+                  "        </div>\n" +
+                  "        <div id=\"plansList\" class=\"plans\"></div>\n" +
+                  "        <div id=\"paymentSection\" class=\"payment-section\">\n" +
+                  "            <h3 id=\"selectedPlanTitle\">Selected Plan</h3>\n" +
+                  "            <div class=\"payment-number\">\n" +
+                  "                <p>Send payment via M-PESA to:</p>\n" +
+                  "                <div class=\"number\">0798688920</div>\n" +
+                  "            </div>\n" +
+                  "            <textarea id=\"mpesaMessage\" rows=\"4\" placeholder=\"Paste your M-PESA confirmation message here...\"></textarea>\n" +
+                  "            <button class=\"submit-btn\" onclick=\"submitPayment()\">✅ SUBMIT & CONNECT</button>\n" +
+                  "            <div id=\"loader\" class=\"loader\"></div>\n" +
+                  "            <div id=\"statusMessage\" class=\"status\"></div>\n" +
+                  "        </div>\n" +
+                  "        <div class=\"support-buttons\">\n" +
+                  "            <a href=\"https://wa.me/254798688920\" class=\"support-btn whatsapp\">💬 WhatsApp</a>\n" +
+                  "            <a href=\"https://www.facebook.com/profile.php?id=100090964671379\" class=\"support-btn facebook\">📘 Facebook</a>\n" +
+                  "        </div>\n" +
+                  "    </div>\n" +
+                  "    <script>\n" +
+                  "        const plans = [\n" +
+                  "            { duration: \"22 mins 30 secs\", price: 2, hours: 0.375, display: \"22 mins 30 secs\" },\n" +
+                  "            { duration: \"45 mins\", price: 3, hours: 0.75, display: \"45 mins\" },\n" +
+                  "            { duration: \"1hr 30mins\", price: 5, hours: 1.5, display: \"1hr 30mins\" },\n" +
+                  "            { duration: \"2hrs 15mins\", price: 8, hours: 2.25, display: \"2hrs 15mins\" },\n" +
+                  "            { duration: \"6hrs\", price: 15, hours: 6, display: \"6hrs\" },\n" +
+                  "            { duration: \"9hrs\", price: 20, hours: 9, display: \"9hrs\" },\n" +
+                  "            { duration: \"18hrs\", price: 25, hours: 18, display: \"18hrs\" },\n" +
+                  "            { duration: \"2 days 6hrs\", price: 60, hours: 54, display: \"2 days 6hrs\" },\n" +
+                  "            { duration: \"5 days 6hrs\", price: 100, hours: 126, display: \"5 days 6hrs\" },\n" +
+                  "            { duration: \"22 days 12hrs\", price: 200, hours: 540, display: \"22 days 12hrs\" },\n" +
+                  "            { duration: \"30 days\", price: 375, hours: 720, display: \"30 days\" },\n" +
+                  "            { duration: \"1 month 15 days\", price: 400, hours: 1080, display: \"1 month 15 days\" },\n" +
+                  "            { duration: \"2 months\", price: 550, hours: 1440, display: \"2 months\" },\n" +
+                  "            { duration: \"3 months\", price: 900, hours: 2160, display: \"3 months\" },\n" +
+                  "            { duration: \"4 months\", price: 1350, hours: 2880, display: \"4 months\" },\n" +
+                  "            { duration: \"6 months\", price: 1800, hours: 4320, display: \"6 months\" },\n" +
+                  "            { duration: \"9 months\", price: 2700, hours: 6480, display: \"9 months\" },\n" +
+                  "            { duration: \"1 year\", price: 3600, hours: 8760, display: \"1 year\" }\n" +
+                  "        ];\n" +
+                  "        let selectedPlan = null;\n" +
+                  "\n" +
+                  "        function selectPlan(plan) {\n" +
+                  "            selectedPlan = plan;\n" +
+                  "            document.getElementById('selectedPlanTitle').innerHTML = '📱 Selected: ' + plan.display + ' @ ' + plan.price + ' KSH';\n" +
+                  "            document.getElementById('plansList').style.display = 'none';\n" +
+                  "            document.getElementById('paymentSection').style.display = 'block';\n" +
+                  "            document.getElementById('loader').style.display = 'none';\n" +
+                  "            document.getElementById('statusMessage').className = 'status';\n" +
+                  "            document.getElementById('statusMessage').style.display = 'none';\n" +
+                  "            document.getElementById('mpesaMessage').value = '';\n" +
+                  "        }\n" +
+                  "\n" +
+                  "        function submitPayment() {\n" +
+                  "            const message = document.getElementById('mpesaMessage').value.trim();\n" +
+                  "            if (!message) { alert('Please paste your M-PESA confirmation message'); return; }\n" +
+                  "            if (!selectedPlan) { alert('Please select a plan first'); return; }\n" +
+                  "            \n" +
+                  "            document.getElementById('loader').style.display = 'block';\n" +
+                  "            document.getElementById('statusMessage').style.display = 'none';\n" +
+                  "            \n" +
+                  "            setTimeout(() => {\n" +
+                  "                document.getElementById('loader').style.display = 'none';\n" +
+                  "                document.getElementById('statusMessage').className = 'status success';\n" +
+                  "                document.getElementById('statusMessage').innerHTML = '✅ SUCCESS! Connected successfully. You may now browse the internet.';\n" +
+                  "                document.getElementById('statusMessage').style.display = 'block';\n" +
+                  "            }, 5000);\n" +
+                  "        }\n" +
+                  "\n" +
+                  "        function renderPlans() {\n" +
+                  "            const container = document.getElementById('plansList');\n" +
+                  "            plans.forEach(plan => {\n" +
+                  "                const card = document.createElement('div');\n" +
+                  "                card.className = 'plan-card';\n" +
+                  "                card.onclick = () => selectPlan(plan);\n" +
+                  "                card.innerHTML = '<div class=\"plan-info\"><h3>⏱️ ' + plan.display + '</h3><p>📱 1 device only</p></div><div class=\"plan-price\"><div class=\"price\">' + plan.price + '</div><div class=\"ksh\">KSH</div></div>';\n" +
+                  "                container.appendChild(card);\n" +
+                  "            });\n" +
+                  "        }\n" +
+                  "        renderPlans();\n" +
+                  "    </script>\n" +
+                  "</body>\n" +
+                  "</html>";
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public void onDestroy() {
+                  super.onDestroy();
+                  if (server != null) {
+                      server.stop(0);
+                  }
+              }
+          }
+          EOF
+
+          # ==================== activity_main.xml ====================
+          cat > app/src/main/res/layout/activity_main.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="20dp"
+              android:background="#1a1a2e"
+              android:gravity="center">
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="🌐 Advanced Astranetworks"
+                  android:textSize="24sp"
+                  android:textColor="#FFFFFF"
+                  android:textStyle="bold"
+                  android:layout_marginBottom="30dp"/>
+
+              <TextView
+                  android:id="@+id/statusText"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Hotspot: INACTIVE"
+                  android:textSize="18sp"
+                  android:textColor="#FF0000"
+                  android:layout_marginBottom="20dp"/>
+
+              <Button
+                  android:id="@+id/startHotspotButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="60dp"
+                  android:text="🚀 START HOTSPOT"
+                  android:textSize="16sp"
+                  android:textStyle="bold"
+                  android:backgroundTint="#00C853"
+                  android:layout_marginBottom="10dp"/>
+
+              <Button
+                  android:id="@+id/stopHotspotButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="60dp"
+                  android:text="⏹️ STOP HOTSPOT"
+                  android:textSize="16sp"
+                  android:textStyle="bold"
+                  android:backgroundTint="#D32F2F"
+                  android:layout_marginBottom="20dp"/>
+
+              <Button
+                  android:id="@+id/viewDashboardButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="60dp"
+                  android:text="📊 VIEW DASHBOARD"
+                  android:textSize="16sp"
+                  android:textStyle="bold"
+                  android:backgroundTint="#2196F3"
+                  android:layout_marginBottom="20dp"/>
+
+              <TextView
+                  android:id="@+id/connectedCountText"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Connected: 0 devices"
+                  android:textSize="14sp"
+                  android:textColor="#CCCCCC"
+                  android:layout_marginBottom="10dp"/>
+
+              <TextView
+                  android:id="@+id/earningsText"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Total Earnings: 0 KSH"
+                  android:textSize="14sp"
+                  android:textColor="#CCCCCC"/>
+
+          </LinearLayout>
+          EOF
+          # ==================== AndroidManifest.xml ====================
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+              <uses-permission android:name="android.permission.READ_SMS" />
+              <uses-permission android:name="android.permission.RECEIVE_SMS" />
+              <uses-permission android:name="android.permission.SEND_SMS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" tools:ignore="ManifestOrder" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/ic_dialog_info"
+                  android:label="Advanced Astranetworks"
+                  android:theme="@style/Theme.AppCompat.NoActionBar"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".DashboardActivity"
+                      android:exported="false"
+                      android:screenOrientation="portrait" />
+
+                  <service
+                      android:name=".HotspotService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
+
+                  <service
+                      android:name=".WebServerService"
+                      android:enabled="true"
+                      android:exported="false" />
+
+              </application>
+          </manifest>
+          EOF
+
+          # ==================== build.gradle (app level) ====================
+          cat > app/build.gradle << 'EOF'
+          apply plugin: 'com.android.application'
+
+          android {
+              namespace 'com.advanced.wifi'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.advanced.wifi"
+                  minSdk 29
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              buildFeatures {
+                  viewBinding true
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.core:core:1.12.0'
+              implementation 'com.google.android.material:material:1.11.0'
+          }
+
+          configurations.all {
+              resolutionStrategy {
+                  force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+                  force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+                  force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+              }
+          }
+          EOF
+
+          # ==================== build.gradle (project level) ====================
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.1.0'
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
+          EOF
+
+          # ==================== settings.gradle ====================
+          cat > settings.gradle << 'EOF'
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AdvancedAstranetworks"
+          include ':app'
+          EOF
+
+          # ==================== gradle.properties ====================
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+
+          # ==================== styles.xml ====================
+          cat > app/src/main/res/values/styles.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.AppCompat.NoActionBar" parent="Theme.AppCompat.Light.NoActionBar" />
+          </resources>
+          EOF
+
+      - name: Generate Gradle Wrapper
+        run: |
+          gradle wrapper --gradle-version 8.0 --distribution-type all
+          chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Advanced-Astranetworks-Hotspot
+          path: app/build/outputs/apk/debug/*.apk
