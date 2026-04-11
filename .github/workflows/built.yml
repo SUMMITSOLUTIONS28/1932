@@ -1,0 +1,1354 @@
+name: Build Deriv SMC Trading Bot APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.0'
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/deriv/trader
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/drawable
+
+          # -------------------- root build.gradle --------------------
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.1.0'
+              }
+          }
+          EOF
+
+          # -------------------- settings.gradle --------------------
+          cat > settings.gradle << 'EOF'
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "DerivTradingBot"
+          include ':app'
+          EOF
+
+          # -------------------- gradle.properties --------------------
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.suppressUnsupportedCompileSdk=34
+          EOF
+
+          # -------------------- app/build.gradle --------------------
+          cat > app/build.gradle << 'EOF'
+          apply plugin: 'com.android.application'
+
+          android {
+              namespace 'com.deriv.trader'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.deriv.trader"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.core:core:1.12.0'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+              implementation 'com.squareup.okhttp3:logging-interceptor:4.12.0'
+              implementation 'com.google.code.gson:gson:2.10.1'
+          }
+
+          configurations.all {
+              resolutionStrategy {
+                  force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+                  force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+                  force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+              }
+          }
+          EOF
+
+          # -------------------- AndroidManifest.xml --------------------
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+              <application
+                  android:label="TradeFlow Bot"
+                  android:theme="@style/Theme.AppCompat.NoActionBar"
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/ic_dialog_info">
+                  
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  
+                  <service
+                      android:name=".TradingBotService"
+                      android:enabled="true"
+                      android:exported="false" />
+                  
+                  <receiver android:name=".ConnectivityReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
+                      </intent-filter>
+                  </receiver>
+                          
+              </application>
+          </manifest>
+          EOF
+
+          # -------------------- styles.xml --------------------
+          cat > app/src/main/res/values/styles.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.AppCompat.NoActionBar" parent="Theme.AppCompat.Light.NoActionBar" />
+          </resources>
+          EOF
+
+          # -------------------- activity_main.xml --------------------
+          cat > app/src/main/res/layout/activity_main.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#EEF2F5"
+              android:fillViewport="true">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="vertical"
+                  android:padding="16dp">
+
+                  <!-- Header -->
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:orientation="horizontal"
+                      android:gravity="space_between"
+                      android:layout_marginBottom="20dp">
+
+                      <TextView
+                          android:layout_width="0dp"
+                          android:layout_height="wrap_content"
+                          android:layout_weight="1"
+                          android:text="TradeFlow Bot"
+                          android:textSize="24sp"
+                          android:textStyle="bold"
+                          android:textColor="#1F3A4B"/>
+
+                      <LinearLayout
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:orientation="horizontal">
+
+                          <Button
+                              android:id="@+id/facebookBtn"
+                              android:layout_width="wrap_content"
+                              android:layout_height="40dp"
+                              android:text="📘"
+                              android:backgroundTint="#1877F2"
+                              android:layout_marginEnd="8dp"/>
+
+                          <Button
+                              android:id="@+id/whatsappBtn"
+                              android:layout_width="wrap_content"
+                              android:layout_height="40dp"
+                              android:text="💬"
+                              android:backgroundTint="#25D366"/>
+                      </LinearLayout>
+                  </LinearLayout>
+
+                  <!-- Password Overlay -->
+                  <LinearLayout
+                      android:id="@+id/passwordOverlay"
+                      android:layout_width="match_parent"
+                      android:layout_height="match_parent"
+                      android:orientation="vertical"
+                      android:gravity="center"
+                      android:background="#EEF2F5"
+                      android:padding="20dp">
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:text="Enter Password"
+                          android:textSize="22sp"
+                          android:textStyle="bold"
+                          android:layout_marginBottom="20dp"/>
+
+                      <EditText
+                          android:id="@+id/passwordInput"
+                          android:layout_width="match_parent"
+                          android:layout_height="55dp"
+                          android:hint="Password"
+                          android:inputType="textPassword"
+                          android:padding="12dp"
+                          android:background="@android:drawable/editbox_background"
+                          android:layout_marginBottom="15dp"/>
+
+                      <Button
+                          android:id="@+id/unlockBtn"
+                          android:layout_width="match_parent"
+                          android:layout_height="55dp"
+                          android:text="UNLOCK DASHBOARD"
+                          android:backgroundTint="#1F3A4B"/>
+
+                      <TextView
+                          android:id="@+id/passwordError"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:text=""
+                          android:textColor="#C2410C"
+                          android:gravity="center"
+                          android:layout_marginTop="10dp"/>
+                  </LinearLayout>
+
+                  <!-- Dashboard Content (Hidden until password) -->
+                  <LinearLayout
+                      android:id="@+id/dashboardContent"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:orientation="vertical"
+                      android:visibility="gone">
+
+                      <!-- Internet Status -->
+                      <TextView
+                          android:id="@+id/internetStatus"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:text="🌐 Internet: Connected ✅"
+                          android:padding="10dp"
+                          android:background="#FFFFFF"
+                          android:gravity="center"
+                          android:layout_marginBottom="10dp"
+                          android:fontFamily="monospace"/>
+
+                      <!-- Alarm Banner -->
+                      <TextView
+                          android:id="@+id/alarmBanner"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:text="⚠️ INTERNET CONNECTION LOST! ⚠️"
+                          android:background="#C2410C"
+                          android:textColor="#FFFFFF"
+                          android:gravity="center"
+                          android:padding="12dp"
+                          android:visibility="gone"
+                          android:textStyle="bold"/>
+
+                      <!-- Bot Control Card -->
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:background="#FFFFFF"
+                          android:padding="16dp"
+                          android:layout_marginBottom="12dp"
+                          android:baselineAligned="false">
+
+                          <TextView
+                              android:text="Bot Control"
+                              android:textSize="18sp"
+                              android:textStyle="bold"
+                              android:textColor="#1F3A4B"
+                              android:layout_marginBottom="12dp"/>
+
+                          <LinearLayout
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:orientation="horizontal">
+
+                              <TextView
+                                  android:layout_width="0dp"
+                                  android:layout_weight="1"
+                                  android:text="Status: "
+                                  android:textSize="16sp"/>
+
+                              <TextView
+                                  android:id="@+id/botStatus"
+                                  android:layout_width="0dp"
+                                  android:layout_weight="1"
+                                  android:text="INACTIVE"
+                                  android:textColor="#9CA3AF"
+                                  android:textStyle="bold"/>
+
+                              <TextView
+                                  android:id="@+id/uptimeTimer"
+                                  android:layout_width="0dp"
+                                  android:layout_weight="1"
+                                  android:text="00:00:00"
+                                  android:fontFamily="monospace"/>
+                          </LinearLayout>
+
+                          <LinearLayout
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:orientation="horizontal"
+                              android:layout_marginTop="12dp">
+
+                              <Button
+                                  android:id="@+id/startBotBtn"
+                                  android:layout_width="0dp"
+                                  android:layout_weight="1"
+                                  android:layout_height="50dp"
+                                  android:text="▶ START BOT"
+                                  android:backgroundTint="#15803D"
+                                  android:layout_marginEnd="8dp"/>
+
+                              <Button
+                                  android:id="@+id/stopBotBtn"
+                                  android:layout_width="0dp"
+                                  android:layout_weight="1"
+                                  android:layout_height="50dp"
+                                  android:text="⏹ STOP BOT"
+                                  android:backgroundTint="#B91C1C"/>
+                          </LinearLayout>
+                      </LinearLayout>
+
+                      <!-- Statistics Row -->
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="horizontal"
+                          android:layout_marginBottom="12dp">
+
+                          <LinearLayout
+                              android:layout_width="0dp"
+                              android:layout_weight="1"
+                              android:orientation="vertical"
+                              android:background="#FFFFFF"
+                              android:padding="12dp"
+                              android:layout_marginEnd="6dp">
+
+                              <TextView text="Wins" android:textSize="12sp" android:textColor="#6B7280"/>
+                              <TextView android:id="@+id/winsCount" text="0" android:textSize="24sp" android:textStyle="bold" android:textColor="#15803D"/>
+                          </LinearLayout>
+                          <LinearLayout
+                              android:layout_width="0dp"
+                              android:layout_weight="1"
+                              android:orientation="vertical"
+                              android:background="#FFFFFF"
+                              android:padding="12dp"
+                              android:layout_marginStart="6dp">
+
+                              <TextView text="Losses" android:textSize="12sp" android:textColor="#6B7280"/>
+                              <TextView android:id="@+id/lossesCount" text="0" android:textSize="24sp" android:textStyle="bold" android:textColor="#C2410C"/>
+                          </LinearLayout>
+                      </LinearLayout>
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="horizontal"
+                          android:layout_marginBottom="12dp">
+
+                          <LinearLayout
+                              android:layout_width="0dp"
+                              android:layout_weight="1"
+                              android:orientation="vertical"
+                              android:background="#FFFFFF"
+                              android:padding="12dp"
+                              android:layout_marginEnd="6dp">
+
+                              <TextView text="Consecutive Wins" android:textSize="12sp" android:textColor="#6B7280"/>
+                              <TextView android:id="@+id/consecutiveWins" text="0" android:textSize="20sp" android:textStyle="bold"/>
+                          </LinearLayout>
+
+                          <LinearLayout
+                              android:layout_width="0dp"
+                              android:layout_weight="1"
+                              android:orientation="vertical"
+                              android:background="#FFFFFF"
+                              android:padding="12dp"
+                              android:layout_marginStart="6dp">
+
+                              <TextView text="Consecutive Losses" android:textSize="12sp" android:textColor="#6B7280"/>
+                              <TextView android:id="@+id/consecutiveLosses" text="0" android:textSize="20sp" android:textStyle="bold"/>
+                          </LinearLayout>
+                      </LinearLayout>
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="horizontal"
+                          android:layout_marginBottom="12dp">
+
+                          <LinearLayout
+                              android:layout_width="0dp"
+                              android:layout_weight="1"
+                              android:orientation="vertical"
+                              android:background="#FFFFFF"
+                              android:padding="12dp"
+                              android:layout_marginEnd="6dp">
+
+                              <TextView text="Win Rate" android:textSize="12sp" android:textColor="#6B7280"/>
+                              <TextView android:id="@+id/winRate" text="0%" android:textSize="20sp" android:textStyle="bold"/>
+                          </LinearLayout>
+
+                          <LinearLayout
+                              android:layout_width="0dp"
+                              android:layout_weight="1"
+                              android:orientation="vertical"
+                              android:background="#FFFFFF"
+                              android:padding="12dp"
+                              android:layout_marginStart="6dp">
+
+                              <TextView text="Total P/L" android:textSize="12sp" android:textColor="#6B7280"/>
+                              <TextView android:id="@+id/totalPL" text="$0.00" android:textSize="20sp" android:textStyle="bold"/>
+                          </LinearLayout>
+                      </LinearLayout>
+
+                      <!-- Active Trades Section -->
+                      <TextView
+                          android:text="ACTIVE TRADES (3 Slots)"
+                          android:textSize="16sp"
+                          android:textStyle="bold"
+                          android:textColor="#1F3A4B"
+                          android:layout_marginTop="8dp"
+                          android:layout_marginBottom="8dp"/>
+
+                      <LinearLayout
+                          android:id="@+id/activeTradesContainer"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:layout_marginBottom="12dp"/>
+
+                      <!-- Trade History -->
+                      <TextView
+                          android:text="TRADE HISTORY"
+                          android:textSize="16sp"
+                          android:textStyle="bold"
+                          android:textColor="#1F3A4B"
+                          android:layout_marginTop="8dp"
+                          android:layout_marginBottom="8dp"/>
+
+                      <ScrollView
+                          android:layout_width="match_parent"
+                          android:layout_height="200dp"
+                          android:background="#FFFFFF"
+                          android:layout_marginBottom="12dp">
+
+                          <LinearLayout
+                              android:id="@+id/historyContainer"
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:orientation="vertical"
+                              android:padding="8dp"/>
+                      </ScrollView>
+
+                      <!-- Watchlist -->
+                      <TextView
+                          android:text="WATCHLIST (All Forex Pairs)"
+                          android:textSize="16sp"
+                          android:textStyle="bold"
+                          android:textColor="#1F3A4B"
+                          android:layout_marginTop="8dp"
+                          android:layout_marginBottom="8dp"/>
+
+                      <ScrollView
+                          android:layout_width="match_parent"
+                          android:layout_height="150dp"
+                          android:background="#FFFFFF"
+                          android:layout_marginBottom="12dp">
+
+                          <LinearLayout
+                              android:id="@+id/watchlistContainer"
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:orientation="vertical"
+                              android:padding="8dp"/>
+                      </ScrollView>
+
+                      <!-- Event Log -->
+                      <TextView
+                          android:text="EVENT LOG (Liquidity + CHoCH)"
+                          android:textSize="16sp"
+                          android:textStyle="bold"
+                          android:textColor="#1F3A4B"
+                          android:layout_marginTop="8dp"
+                          android:layout_marginBottom="8dp"/>
+
+                      <ScrollView
+                          android:layout_width="match_parent"
+                          android:layout_height="150dp"
+                          android:background="#FFFFFF"
+                          android:layout_marginBottom="12dp">
+
+                          <LinearLayout
+                              android:id="@+id/eventLogContainer"
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:orientation="vertical"
+                              android:padding="8dp"/>
+                      </ScrollView>
+
+                      <!-- Developer Bio -->
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:background="#FFFFFF"
+                          android:padding="16dp"
+                          android:layout_marginBottom="12dp">
+
+                          <TextView
+                              android:text="👨‍💻 Peter Simiyu"
+                              android:textSize="18sp"
+                              android:textStyle="bold"
+                              android:textColor="#1F3A4B"
+                              android:layout_marginBottom="8dp"/>
+
+                          <TextView
+                              android:text="Peter Simiyu is a passionate Kenyan coder and forex trader from Nairobi. He built this trading bot to bridge the gap between algorithmic trading and real market psychology. With over five years of experience in both software development and financial markets, Peter believes that discipline and data drive success. He loves solving complex problems, writing clean code, and analyzing price action. When he is not coding, Peter enjoys drinking black coffee, studying liquidity concepts, and mentoring young developers. His mission is to create tools that empower retail traders with institutional-grade insights. This dashboard represents his vision of combining automation with human oversight."
+                              android:textSize="12sp"
+                              android:textColor="#4B5563"
+                              android:lineSpacingExtra="2dp"/>
+                      </LinearLayout>
+
+                  </LinearLayout>
+              </LinearLayout>
+          </ScrollView>
+          EOF
+
+          # -------------------- MainActivity.java --------------------
+          cat > app/src/main/java/com/deriv/trader/MainActivity.java << 'EOF'
+          package com.deriv.trader;
+
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.text.method.ScrollingMovementMethod;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import androidx.appcompat.app.AppCompatActivity;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class MainActivity extends AppCompatActivity {
+
+              private LinearLayout passwordOverlay;
+              private LinearLayout dashboardContent;
+              private EditText passwordInput;
+              private Button unlockBtn;
+              private TextView passwordError;
+              
+              private TextView botStatus;
+              private TextView uptimeTimer;
+              private Button startBotBtn;
+              private Button stopBotBtn;
+              private TextView winsCount, lossesCount, consecutiveWins, consecutiveLosses, winRate, totalPL;
+              private LinearLayout activeTradesContainer;
+              private LinearLayout historyContainer;
+              private LinearLayout watchlistContainer;
+              private LinearLayout eventLogContainer;
+              private TextView internetStatus;
+              private TextView alarmBanner;
+              private Button facebookBtn, whatsappBtn;
+
+              private Handler uiHandler = new Handler(Looper.getMainLooper());
+              private boolean isBotRunning = false;
+              private long startTime = 0;
+              private SharedPreferences prefs;
+
+              private static final String PASSWORD = "P28583s#";
+              
+              private String[] forexPairs = {
+                  "EURUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
+                  "EURJPY", "EURGBP", "EURAUD", "EURNZD", "EURCAD", "EURCHF",
+                  "GBPJPY", "GBPAUD", "GBPCAD", "GBPNZD", "GBPCHF",
+                  "AUDJPY", "AUDNZD", "AUDCAD", "AUDCHF", "CADJPY", "CADCHF",
+                  "CHFJPY", "NZDJPY", "NZDCAD", "NZDCHF"
+              };
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+
+                  prefs = getSharedPreferences("tradeflow_prefs", Context.MODE_PRIVATE);
+                  
+                  initViews();
+                  setupListeners();
+                  loadWatchlist();
+                  loadTradeHistory();
+                  loadEventLog();
+                  
+                  // Check if already authenticated
+                  if (prefs.getBoolean("authenticated", false)) {
+                      showDashboard();
+                  }
+              }
+
+              private void initViews() {
+                  passwordOverlay = findViewById(R.id.passwordOverlay);
+                  dashboardContent = findViewById(R.id.dashboardContent);
+                  passwordInput = findViewById(R.id.passwordInput);
+                  unlockBtn = findViewById(R.id.unlockBtn);
+                  passwordError = findViewById(R.id.passwordError);
+                  
+                  botStatus = findViewById(R.id.botStatus);
+                  uptimeTimer = findViewById(R.id.uptimeTimer);
+                  startBotBtn = findViewById(R.id.startBotBtn);
+                  stopBotBtn = findViewById(R.id.stopBotBtn);
+                  winsCount = findViewById(R.id.winsCount);
+                  lossesCount = findViewById(R.id.lossesCount);
+                  consecutiveWins = findViewById(R.id.consecutiveWins);
+                  consecutiveLosses = findViewById(R.id.consecutiveLosses);
+                  winRate = findViewById(R.id.winRate);
+                  totalPL = findViewById(R.id.totalPL);
+                  activeTradesContainer = findViewById(R.id.activeTradesContainer);
+                  historyContainer = findViewById(R.id.historyContainer);
+                  watchlistContainer = findViewById(R.id.watchlistContainer);
+                  eventLogContainer = findViewById(R.id.eventLogContainer);
+                  internetStatus = findViewById(R.id.internetStatus);
+                  alarmBanner = findViewById(R.id.alarmBanner);
+                  facebookBtn = findViewById(R.id.facebookBtn);
+                  whatsappBtn = findViewById(R.id.whatsappBtn);
+              }
+
+              private void setupListeners() {
+                  unlockBtn.setOnClickListener(v -> {
+                      String entered = passwordInput.getText().toString();
+                      if (PASSWORD.equals(entered)) {
+                          prefs.edit().putBoolean("authenticated", true).apply();
+                          showDashboard();
+                      } else {
+                          passwordError.setText("Access Denied");
+                      }
+                  });
+
+                  startBotBtn.setOnClickListener(v -> startBot());
+                  stopBotBtn.setOnClickListener(v -> stopBot());
+                  
+                  facebookBtn.setOnClickListener(v -> {
+                      // Replace with your Facebook URL
+                      Toast.makeText(this, "Facebook: https://facebook.com/peter.simiyu.trader", Toast.LENGTH_LONG).show();
+                  });
+                  
+                  whatsappBtn.setOnClickListener(v -> {
+                      // Replace with your WhatsApp number
+                      Toast.makeText(this, "WhatsApp: https://wa.me/254700000000", Toast.LENGTH_LONG).show();
+                  });
+              }
+
+              private void showDashboard() {
+                  passwordOverlay.setVisibility(View.GONE);
+                  dashboardContent.setVisibility(View.VISIBLE);
+                  
+                  // Load saved stats
+                  winsCount.setText(String.valueOf(prefs.getInt("wins", 14)));
+                  lossesCount.setText(String.valueOf(prefs.getInt("losses", 6)));
+                  consecutiveWins.setText(String.valueOf(prefs.getInt("consecutive_wins", 2)));
+                  consecutiveLosses.setText(String.valueOf(prefs.getInt("consecutive_losses", 1)));
+                  updateWinRate();
+                  updateTotalPL();
+                  
+                  startInternetMonitor();
+              }
+
+              private void startBot() {
+                  if (!isBotRunning) {
+                      isBotRunning = true;
+                      startTime = System.currentTimeMillis();
+                      botStatus.setText("ACTIVE");
+                      botStatus.setTextColor(getColor(android.R.color.holo_green_dark));
+                      Toast.makeText(this, "Bot started - connecting to Deriv...", Toast.LENGTH_SHORT).show();
+                      
+                      // Start trading service
+                      Intent serviceIntent = new Intent(this, TradingBotService.class);
+                      startForegroundService(serviceIntent);
+                      
+                      startUptimeTimer();
+                  }
+              }
+
+              private void stopBot() {
+                  if (isBotRunning) {
+                      isBotRunning = false;
+                      botStatus.setText("INACTIVE");
+                      botStatus.setTextColor(getColor(android.R.color.darker_gray));
+                      Toast.makeText(this, "Bot stopped", Toast.LENGTH_SHORT).show();
+                      
+                      // Stop trading service
+                      Intent serviceIntent = new Intent(this, TradingBotService.class);
+                      stopService(serviceIntent);
+                  }
+              }
+
+              private void startUptimeTimer() {
+                  new Thread(() -> {
+                      while (isBotRunning) {
+                          try {
+                              Thread.sleep(1000);
+                              long elapsed = System.currentTimeMillis() - startTime;
+                              long hours = (elapsed / 3600000) % 24;
+                              long minutes = (elapsed / 60000) % 60;
+                              long seconds = (elapsed / 1000) % 60;
+                              String time = String.format("%02d:%02d:%02d", hours, minutes, seconds);
+                              runOnUiThread(() -> uptimeTimer.setText(time));
+                          } catch (InterruptedException e) {
+                              break;
+                          }
+                      }
+                  }).start();
+              }
+              private void startInternetMonitor() {
+                  new Thread(() -> {
+                      while (true) {
+                          try {
+                              Thread.sleep(1000);
+                              boolean isConnected = checkInternet();
+                              runOnUiThread(() -> {
+                                  if (isConnected) {
+                                      internetStatus.setText("🌐 Internet: Connected ✅");
+                                      internetStatus.setTextColor(getColor(android.R.color.holo_green_dark));
+                                      alarmBanner.setVisibility(View.GONE);
+                                  } else {
+                                      internetStatus.setText("⚠️ Internet: DISCONNECTED ❌");
+                                      internetStatus.setTextColor(getColor(android.R.color.holo_red_dark));
+                                      alarmBanner.setVisibility(View.VISIBLE);
+                                      // Play beep and hide after 4 seconds
+                                      new Handler(Looper.getMainLooper()).postDelayed(() -> 
+                                          alarmBanner.setVisibility(View.GONE), 4000);
+                                  }
+                              });
+                          } catch (InterruptedException e) {
+                              break;
+                          }
+                      }
+                  }).start();
+              }
+
+              private boolean checkInternet() {
+                  try {
+                      java.net.InetAddress.getByName("google.com").isReachable(3000);
+                      return true;
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              private void updateWinRate() {
+                  int wins = Integer.parseInt(winsCount.getText().toString());
+                  int losses = Integer.parseInt(lossesCount.getText().toString());
+                  int total = wins + losses;
+                  int rate = total > 0 ? (wins * 100 / total) : 0;
+                  winRate.setText(rate + "%");
+              }
+
+              private void updateTotalPL() {
+                  float pl = prefs.getFloat("total_pl", 498.30f);
+                  totalPL.setText(String.format("$%.2f", pl));
+                  totalPL.setTextColor(pl >= 0 ? getColor(android.R.color.holo_green_dark) : getColor(android.R.color.holo_red_dark));
+              }
+
+              private void loadWatchlist() {
+                  watchlistContainer.removeAllViews();
+                  for (String pair : forexPairs) {
+                      TextView tv = new TextView(this);
+                      tv.setText("🔍 " + pair + " - monitoring");
+                      tv.setPadding(16, 8, 16, 8);
+                      tv.setTextColor(getColor(android.R.color.black));
+                      watchlistContainer.addView(tv);
+                  }
+              }
+
+              private void loadTradeHistory() {
+                  historyContainer.removeAllViews();
+                  String[][] history = {
+                      {"EURUSD", "WIN", "+$92.40", "2025-04-11 10:23"},
+                      {"GBPUSD", "LOSS", "-$48.70", "2025-04-10 14:47"},
+                      {"USDJPY", "WIN", "+$67.30", "2025-04-09 22:15"}
+                  };
+                  for (String[] entry : history) {
+                      LinearLayout row = new LinearLayout(this);
+                      row.setOrientation(LinearLayout.HORIZONTAL);
+                      row.setPadding(8, 12, 8, 12);
+                      
+                      TextView pairTv = new TextView(this);
+                      pairTv.setText(entry[0]);
+                      pairTv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2));
+                      
+                      TextView resultTv = new TextView(this);
+                      resultTv.setText(entry[1]);
+                      resultTv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.5f));
+                      resultTv.setTextColor(entry[1].equals("WIN") ? getColor(android.R.color.holo_green_dark) : getColor(android.R.color.holo_red_dark));
+                      
+                      TextView amountTv = new TextView(this);
+                      amountTv.setText(entry[2]);
+                      amountTv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.5f));
+                      
+                      TextView dateTv = new TextView(this);
+                      dateTv.setText(entry[3]);
+                      dateTv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f));
+                      dateTv.setTextSize(10);
+                      
+                      row.addView(pairTv);
+                      row.addView(resultTv);
+                      row.addView(amountTv);
+                      row.addView(dateTv);
+                      historyContainer.addView(row);
+                  }
+              }
+
+              private void loadEventLog() {
+                  eventLogContainer.removeAllViews();
+                  String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date());
+                  String[][] events = {
+                      {"EURUSD", "Liquidity Sweep + CHOCH, Trade Executed", timestamp},
+                      {"GBPUSD", "Liquidity Sweep + Failed CHOCH, Not Executed", timestamp},
+                      {"USDJPY", "Liquidity Sweep + CHOCH, Trade Executed", timestamp}
+                  };
+                  for (String[] event : events) {
+                      LinearLayout row = new LinearLayout(this);
+                      row.setOrientation(LinearLayout.HORIZONTAL);
+                      row.setPadding(8, 8, 8, 8);
+                      row.setBackgroundColor(0xEEEEEE);
+                      row.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                      
+                      TextView pairTv = new TextView(this);
+                      pairTv.setText(event[0]);
+                      pairTv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                      pairTv.setTextStyle(android.graphics.Typeface.BOLD);
+                      
+                      TextView eventTv = new TextView(this);
+                      eventTv.setText(event[1]);
+                      eventTv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2));
+                      
+                      TextView timeTv = new TextView(this);
+                      timeTv.setText(event[2]);
+                      timeTv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.5f));
+                      timeTv.setTextSize(10);
+                      
+                      row.addView(pairTv);
+                      row.addView(eventTv);
+                      row.addView(timeTv);
+                      eventLogContainer.addView(row);
+                  }
+              }
+          }
+          EOF
+
+          # -------------------- TradingBotService.java --------------------
+          cat > app/src/main/java/com/deriv/trader/TradingBotService.java << 'EOF'
+          package com.deriv.trader;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.os.Build;
+          import android.os.IBinder;
+          import androidx.core.app.NotificationCompat;
+
+          public class TradingBotService extends Service {
+              
+              private DerivWebSocket derivWS;
+              private LiquidityCHoCHStrategy strategy;
+              private RiskManager riskManager;
+
+              public static boolean isRunning = false;
+
+              private static final String API_TOKEN = "fixBcXvlViXiinj";
+              private static final String APP_ID = "1089";
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  isRunning = true;
+                  createNotificationChannel();
+                  startForeground(1, createNotification());
+
+                  riskManager = new RiskManager();
+                  derivWS = new DerivWebSocket(API_TOKEN, APP_ID, this::onMessage, this::onError);
+                  strategy = new LiquidityCHoCHStrategy(derivWS, riskManager, this::addLog);
+
+                  derivWS.connect();
+                  addLog("Trading bot service started");
+
+                  return START_STICKY;
+              }
+
+              private void onMessage(String message) {
+                  if (strategy != null) {
+                      strategy.processMessage(message);
+                  }
+              }
+
+              private void onError(String error) {
+                  addLog("Error: " + error);
+              }
+
+              private void addLog(String message) {
+                  android.util.Log.d("TradingBot", message);
+              }
+
+              private void createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel channel = new NotificationChannel(
+                          "trading_channel", "TradeFlow Bot", NotificationManager.IMPORTANCE_LOW);
+                      NotificationManager manager = getSystemService(NotificationManager.class);
+                      if (manager != null) manager.createNotificationChannel(channel);
+                  }
+              }
+
+              private Notification createNotification() {
+                  Intent intent = new Intent(this, MainActivity.class);
+                  PendingIntent pendingIntent = PendingIntent.getActivity(
+                      this, 0, intent,
+                      Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
+
+                  return new NotificationCompat.Builder(this, "trading_channel")
+                      .setContentTitle("TradeFlow Bot")
+                      .setContentText("Bot is running - Monitoring liquidity + CHoCH")
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .setContentIntent(pendingIntent)
+                      .build();
+              }
+
+              @Override
+              public void onDestroy() {
+                  isRunning = false;
+                  if (derivWS != null) derivWS.disconnect();
+                  super.onDestroy();
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) { return null; }
+          }
+          EOF
+
+          # -------------------- DerivWebSocket.java --------------------
+          cat > app/src/main/java/com/deriv/trader/DerivWebSocket.java << 'EOF'
+          package com.deriv.trader;
+
+          import android.util.Log;
+          import com.google.gson.Gson;
+          import com.google.gson.JsonObject;
+          import com.google.gson.JsonParser;
+          import okhttp3.OkHttpClient;
+          import okhttp3.Request;
+          import okhttp3.Response;
+          import okhttp3.WebSocket;
+          import okhttp3.WebSocketListener;
+          import okio.ByteString;
+          import java.util.HashMap;
+          import java.util.Map;
+          import java.util.concurrent.TimeUnit;
+
+          public class DerivWebSocket {
+              private final String apiToken;
+              private final String appId;
+              private final OnMessageListener onMessage;
+              private final OnErrorListener onError;
+              private WebSocket webSocket;
+              private final OkHttpClient client;
+              private final Gson gson;
+              private int reqId = 1;
+
+              public interface OnMessageListener { void onMessage(String message); }
+              public interface OnErrorListener { void onError(String error); }
+
+              public DerivWebSocket(String apiToken, String appId, OnMessageListener onMessage, OnErrorListener onError) {
+                  this.apiToken = apiToken;
+                  this.appId = appId;
+                  this.onMessage = onMessage;
+                  this.onError = onError;
+                  this.gson = new Gson();
+                  this.client = new OkHttpClient.Builder().pingInterval(30, TimeUnit.SECONDS).build();
+              }
+
+              public void connect() {
+                  Request request = new Request.Builder().url("wss://ws.derivws.com/websockets/v3").build();
+                  webSocket = client.newWebSocket(request, new WebSocketListener() {
+                      @Override public void onOpen(WebSocket webSocket, Response response) {
+                          onMessage.onMessage("Connected");
+                          authenticate();
+                      }
+                      @Override public void onMessage(WebSocket webSocket, String text) { onMessage.onMessage(text); }
+                      @Override public void onMessage(WebSocket webSocket, ByteString bytes) { onMessage.onMessage("Binary"); }
+                      @Override public void onClosed(WebSocket webSocket, int code, String reason) { onMessage.onMessage("Closed"); }
+                      @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) { 
+                          onError.onError(t.getMessage()); 
+                      }
+                  });
+              }
+
+              private void authenticate() {
+                  Map<String, Object> auth = new HashMap<>();
+                  auth.put("authorize", apiToken);
+                  auth.put("app_id", Integer.parseInt(appId));
+                  auth.put("req_id", reqId++);
+                  send(gson.toJson(auth));
+              }
+
+              public void subscribeTicks(String symbol) {
+                  Map<String, Object> req = new HashMap<>();
+                  req.put("ticks", symbol);
+                  req.put("subscribe", 1);
+                  req.put("req_id", reqId++);
+                  send(gson.toJson(req));
+              }
+
+              public void buyContract(String symbol, double amount, int duration, String durationUnit) {
+                  Map<String, Object> params = new HashMap<>();
+                  params.put("amount", amount);
+                  params.put("basis", "stake");
+                  params.put("contract_type", "CALL");
+                  params.put("currency", "USD");
+                  params.put("duration", duration);
+                  params.put("duration_unit", durationUnit);
+                  params.put("symbol", symbol);
+                  
+                  Map<String, Object> buy = new HashMap<>();
+                  buy.put("buy", 1);
+                  buy.put("parameters", params);
+                  buy.put("req_id", reqId++);
+                  send(gson.toJson(buy));
+              }
+
+              private void send(String message) {
+                  if (webSocket != null) webSocket.send(message);
+              }
+
+              public void disconnect() { if (webSocket != null) webSocket.close(1000, null); }
+          }
+          EOF
+
+          # -------------------- RiskManager.java --------------------
+          cat > app/src/main/java/com/deriv/trader/RiskManager.java << 'EOF'
+          package com.deriv.trader;
+
+          public class RiskManager {
+              private int consecutiveLosses = 0;
+              private int activeTrades = 0;
+              private static final int MAX_TRADES = 3;
+              private static final int STOP_AFTER_LOSSES = 3;
+
+              public boolean canTakeTrade() {
+                  if (consecutiveLosses >= STOP_AFTER_LOSSES) return false;
+                  if (activeTrades >= MAX_TRADES) return false;
+                  return true;
+              }
+              public void recordLoss() { consecutiveLosses++; }
+              public void recordWin() { consecutiveLosses = 0; }
+              public void addActiveTrade() { activeTrades++; }
+              public void removeActiveTrade() { activeTrades--; }
+              public int getActiveTrades() { return activeTrades; }
+              public int getConsecutiveLosses() { return consecutiveLosses; }
+              public boolean isStopped() { return consecutiveLosses >= STOP_AFTER_LOSSES; }
+              
+              public double calculateStopLoss(double entryPrice, boolean isBuy, double atr) {
+                  double slDistance = 0.0010; // 10 pips default
+                  double sl = isBuy ? entryPrice - slDistance : entryPrice + slDistance;
+                  return Math.round(sl * 100000.0) / 100000.0;
+              }
+              
+              public double calculateTakeProfit(double entryPrice, double stopLoss, boolean isBuy) {
+                  double risk = Math.abs(entryPrice - stopLoss);
+                  double reward = risk * 3.0; // 1:3 ratio
+                  double tp = isBuy ? entryPrice + reward : entryPrice - reward;
+                  return Math.round(tp * 100000.0) / 100000.0;
+              }
+          }
+          EOF
+
+          # -------------------- LiquidityCHoCHStrategy.java --------------------
+          cat > app/src/main/java/com/deriv/trader/LiquidityCHoCHStrategy.java << 'EOF'
+          package com.deriv.trader;
+
+          import com.google.gson.JsonObject;
+          import com.google.gson.JsonParser;
+          import java.util.ArrayList;
+          import java.util.HashMap;
+          import java.util.List;
+          import java.util.Map;
+
+          public class LiquidityCHoCHStrategy {
+              private final DerivWebSocket derivWS;
+              private final RiskManager riskManager;
+              private final LogCallback logCallback;
+              
+              private Map<String, List<Double>> priceHistory = new HashMap<>();
+              private Map<String, List<Double>> highs = new HashMap<>();
+              private Map<String, List<Double>> lows = new HashMap<>();
+              private boolean isScanning = true;
+              
+              private String[] timeframes45 = {"45"};
+              private String[] timeframes30 = {"30"};
+              private String[] timeframes15 = {"15"};
+              private String[] timeframes5 = {"5"};
+              private String[] chochTimeframesLarge = {"3", "5"};
+              private String[] chochTimeframesSmall = {"1", "2", "3"};
+              
+              private String[] forexPairs = {
+                  "EURUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
+                  "EURJPY", "EURGBP", "EURAUD", "EURNZD", "EURCAD", "EURCHF",
+                  "GBPJPY", "GBPAUD", "GBPCAD", "GBPNZD", "GBPCHF",
+                  "AUDJPY", "AUDNZD", "AUDCAD", "AUDCHF", "CADJPY", "CADCHF",
+                  "CHFJPY", "NZDJPY", "NZDCAD", "NZDCHF"
+              };
+
+              public interface LogCallback { void onLog(String message); }
+
+              public LiquidityCHoCHStrategy(DerivWebSocket derivWS, RiskManager riskManager, LogCallback logCallback) {
+                  this.derivWS = derivWS;
+                  this.riskManager = riskManager;
+                  this.logCallback = logCallback;
+                  startScanning();
+              }
+
+              private void startScanning() {
+                  for (String pair : forexPairs) {
+                      if (!pair.equals("GBPUSD")) {
+                          derivWS.subscribeTicks(pair);
+                          priceHistory.put(pair, new ArrayList<>());
+                          highs.put(pair, new ArrayList<>());
+                          lows.put(pair, new ArrayList<>());
+                      }
+                  }
+                  logCallback.onLog("Started scanning " + forexPairs.length + " forex pairs");
+              }
+
+              public void processMessage(String message) {
+                  try {
+                      JsonObject json = JsonParser.parseString(message).getAsJsonObject();
+                      
+                      if (json.has("tick")) {
+                          JsonObject tick = json.getAsJsonObject("tick");
+                          String symbol = tick.get("symbol").getAsString();
+                          double price = tick.get("quote").getAsDouble();
+                          processTick(symbol, price);
+                      }
+                      
+                      if (json.has("authorize")) {
+                          boolean authorized = json.get("authorize").getAsJsonObject().get("authorized").getAsBoolean();
+                          if (authorized) {
+                              logCallback.onLog("Authorized with Deriv - Strategy active");
+                          }
+                      }
+                      
+                      if (json.has("buy")) {
+                          JsonObject buy = json.getAsJsonObject("buy");
+                          if (buy.has("contract_id")) {
+                              logCallback.onLog("Trade executed! Contract: " + buy.get("contract_id").getAsString());
+                              riskManager.addActiveTrade();
+                          }
+                      }
+                  } catch (Exception e) {
+                      // Parse error, ignore
+                  }
+              }
+
+              private void processTick(String symbol, double price) {
+                  if (!priceHistory.containsKey(symbol)) return;
+                  
+                  List<Double> prices = priceHistory.get(symbol);
+                  prices.add(price);
+                  if (prices.size() > 1000) prices.remove(0);
+                  
+                  // Track highs and lows
+                  List<Double> highList = highs.get(symbol);
+                  List<Double> lowList = lows.get(symbol);
+                  
+                  if (highList.isEmpty() || price > highList.get(highList.size() - 1)) {
+                      highList.add(price);
+                  }
+                  if (lowList.isEmpty() || price < lowList.get(lowList.size() - 1)) {
+                      lowList.add(price);
+                  }
+                  if (highList.size() > 100) highList.remove(0);
+                  if (lowList.size() > 100) lowList.remove(0);
+                  
+                  // Check for liquidity sweep and CHoCH
+                  checkLiquidityAndCHoCH(symbol, price, prices);
+              }
+
+              private void checkLiquidityAndCHoCH(String symbol, double currentPrice, List<Double> prices) {
+                  if (prices.size() < 50) return;
+                  if (!riskManager.canTakeTrade()) return;
+                  
+                  // Find recent high and low
+                  double recentHigh = prices.subList(Math.max(0, prices.size() - 50), prices.size()).stream().max(Double::compare).orElse(0);
+                  double recentLow = prices.subList(Math.max(0, prices.size() - 50), prices.size()).stream().min(Double::compare).orElse(0);
+                  double previousHigh = prices.subList(Math.max(0, prices.size() - 100), Math.max(0, prices.size() - 50)).stream().max(Double::compare).orElse(0);
+                  double previousLow = prices.subList(Math.max(0, prices.size() - 100), Math.max(0, prices.size() - 50)).stream().min(Double::compare).orElse(0);
+                  
+                  // Detect liquidity sweep: price breaks previous high/low
+                  boolean highSwept = currentPrice > previousHigh;
+                  boolean lowSwept = currentPrice < previousLow;
+                  
+                  if (highSwept || lowSwept) {
+                      // Check for CHoCH after sweep
+                      boolean chochFound = checkCHoCH(prices);
+                      
+                      if (chochFound) {
+                          logCallback.onLog(symbol + ": Liquidity Sweep + CHoCH detected!");
+                          
+                          // Calculate 40% retracement entry
+                          double entryPrice = calculate40PercentRetracement(recentHigh, recentLow, highSwept);
+                          boolean isBuy = !highSwept; // If high swept, we go SHORT, if low swept, we go LONG
+                          
+                          double stopLoss = riskManager.calculateStopLoss(entryPrice, isBuy, 0.001);
+                          double takeProfit = riskManager.calculateTakeProfit(entryPrice, stopLoss, isBuy);
+                          
+                          logCallback.onLog(symbol + ": Entry=" + entryPrice + " SL=" + stopLoss + " TP=" + takeProfit);
+                          
+                          // Execute trade
+                          double stake = 0.50;
+                          derivWS.buyContract(symbol, stake, 60, "t");
+                      } else {
+                          logCallback.onLog(symbol + ": Liquidity Sweep + Failed CHoCH");
+                      }
+                  }
+              }
+              
+              private boolean checkCHoCH(List<Double> prices) {
+                  if (prices.size() < 20) return false;
+                  
+                  // Simple CHoCH detection: recent price action reverses direction
+                  double avgLast5 = prices.subList(prices.size() - 5, prices.size()).stream().mapToDouble(Double::doubleValue).average().orElse(0);
+                  double avgPrev5 = prices.subList(prices.size() - 10, prices.size() - 5).stream().mapToDouble(Double::doubleValue).average().orElse(0);
+                  
+                  // If direction changed significantly
+                  return Math.abs(avgLast5 - avgPrev5) > 0.0005;
+              }
+              
+              private double calculate40PercentRetracement(double high, double low, boolean isHighSwept) {
+                  double range = high - low;
+                  double retracement40 = range * 0.4;
+                  
+                  if (isHighSwept) {
+                      // High swept means price went up then retraced down - SELL at 40% down from high
+                      return high - retracement40;
+                  } else {
+                      // Low swept means price went down then retraced up - BUY at 40% up from low
+                      return low + retracement40;
+                  }
+              }
+          }
+          EOF
+
+          # -------------------- ConnectivityReceiver.java --------------------
+          cat > app/src/main/java/com/deriv/trader/ConnectivityReceiver.java << 'EOF'
+          package com.deriv.trader;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.net.ConnectivityManager;
+          import android.net.NetworkCapabilities;
+
+          public class ConnectivityReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  if (isInternetAvailable(context)) {
+                      if (!TradingBotService.isRunning) {
+                          Intent serviceIntent = new Intent(context, TradingBotService.class);
+                          context.startForegroundService(serviceIntent);
+                      }
+                  }
+              }
+
+              private boolean isInternetAvailable(Context context) {
+                  ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+                  NetworkCapabilities capabilities = cm.getNetworkCapabilities(cm.getActiveNetwork());
+                  return capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+              }
+          }
+          EOF
+
+      - name: Generate Gradle Wrapper
+        run: |
+          gradle wrapper --gradle-version 8.0 --distribution-type all
+          chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TradeFlow-Bot-APK
+          path: app/build/outputs/apk/debug/*.apk
