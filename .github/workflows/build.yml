@@ -1,0 +1,685 @@
+name: simiyu_bot - Major Forex Pairs Trading Bot
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install deriv-api-python pandas numpy websocket-client requests
+
+      - name: Create multi-currency trading bot
+        run: |
+          cat > simiyu_bot_forex.py << 'EOF'
+          import json
+          import time
+          import threading
+          from datetime import datetime, timedelta
+          from typing import Dict, List, Optional, Tuple
+          import logging
+          from dataclasses import dataclass, field
+          from collections import deque
+          import requests
+          import websocket
+          import pandas as pd
+          import numpy as np
+
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(levelname)s - %(message)s',
+              handlers=[
+                  logging.FileHandler('simiyu_bot_forex.log'),
+                  logging.StreamHandler()
+              ]
+          )
+          logger = logging.getLogger(__name__)
+
+          @dataclass
+          class Trade:
+              entry_price: float
+              stop_loss: float
+              take_profit: float
+              entry_time: datetime
+              trade_type: str  # 'buy' or 'sell'
+              timeframe: str
+              pair: str
+              status: str = 'open'
+              exit_price: float = None
+              exit_time: datetime = None
+              profit_loss: float = None
+
+          @dataclass
+          class SweepEvent:
+              price: float
+              timeframe: str
+              sweep_type: str
+              timestamp: datetime
+              is_high_timeframe: bool
+              pair: str
+
+          class ForexLiquidityCHOCHBot:
+              def __init__(self, api_token: str, app_id: str, account_type: str):
+                  self.api_token = api_token
+                  self.app_id = app_id
+                  self.account_type = account_type
+                  
+                  # Major Forex Pairs
+                  self.forex_pairs = [
+                      "frxEURUSD",  # Euro/US Dollar
+                      "frxGBPUSD",  # British Pound/US Dollar
+                      "frxUSDJPY",  # US Dollar/Japanese Yen
+                      "frxAUDUSD",  # Australian Dollar/US Dollar
+                      "frxUSDCAD",  # US Dollar/Canadian Dollar
+                      "frxUSDCHF",  # US Dollar/Swiss Franc
+                      "frxNZDUSD"   # New Zealand Dollar/US Dollar
+                  ]
+                  
+                  # Trading parameters
+                  self.max_concurrent_trades = 3
+                  self.active_trades: List[Trade] = []
+                  self.consecutive_losses = 0
+                  self.is_stopped = False
+                  
+                  # Statistics per pair
+                  self.pair_stats: Dict[str, Dict] = {}
+                  for pair in self.forex_pairs:
+                      self.pair_stats[pair] = {
+                          'total_trades': 0,
+                          'wins': 0,
+                          'losses': 0,
+                          'net_profit': 0.0,
+                          'consecutive_losses': 0
+                      }
+                  
+                  # Global statistics
+                  self.total_trades = 0
+                  self.wins = 0
+                  self.losses = 0
+                  self.net_profit = 0.0
+                  
+                  # Timeframes
+                  self.high_timeframes = ['45m', '30m']
+                  self.low_timeframes = ['15m', '5m']
+                  self.all_timeframes = self.high_timeframes + self.low_timeframes
+                  
+                  # Store OHLC data for each pair and timeframe
+                  self.ohlc_data: Dict[str, Dict[str, pd.DataFrame]] = {}
+                  for pair in self.forex_pairs:
+                      self.ohlc_data[pair] = {}
+                      for tf in self.all_timeframes:
+                          self.ohlc_data[pair][tf] = pd.DataFrame(
+                              columns=['timestamp', 'open', 'high', 'low', 'close']
+                          )
+                  
+                  # Sweep tracking
+                  self.sweeps: List[SweepEvent] = []
+                  self.last_processed_highs_lows: Dict[str, Dict[str, Dict]] = {}
+                  for pair in self.forex_pairs:
+                      self.last_processed_highs_lows[pair] = {}
+                      for tf in self.all_timeframes:
+                          self.last_processed_highs_lows[pair][tf] = {'high': None, 'low': None}
+                  
+                  # WebSocket connection
+                  self.ws = None
+                  self.is_running = True
+                  
+                  # Start bot
+                  self.connect_to_deriv()
+                  
+              def connect_to_deriv(self):
+                  """Establish connection to Deriv API"""
+                  try:
+                      self.ws = websocket.WebSocketApp(
+                          "wss://ws.derivws.com/websockets/v3",
+                          on_message=self.on_message,
+                          on_error=self.on_error,
+                          on_close=self.on_close
+                      )
+                      
+                      wst = threading.Thread(target=self.ws.run_forever)
+                      wst.daemon = True
+                      wst.start()
+                      
+                      time.sleep(2)
+                      self.authenticate()
+                      self.subscribe_to_all_pairs()
+                      
+                  except Exception as e:
+                      logger.error(f"Connection error: {e}")
+                      self.is_running = False
+              
+              def authenticate(self):
+                  """Authenticate with Deriv API"""
+                  auth_request = {
+                      "authorize": self.api_token,
+                      "req_id": 1
+                  }
+                  self.ws.send(json.dumps(auth_request))
+                  logger.info("Authentication request sent")
+              
+              def subscribe_to_all_pairs(self):
+                  """Subscribe to price feeds for all forex pairs and timeframes"""
+                  for pair in self.forex_pairs:
+                      for timeframe in self.all_timeframes:
+                          subscribe_request = {
+                              "ticks_history": pair,
+                              "adjust_start_time": 1,
+                              "count": 1000,
+                              "end": "latest",
+                              "start": int((datetime.now() - timedelta(days=7)).timestamp()),
+                              "style": "candles",
+                              "granularity": self.get_granularity(timeframe),
+                              "subscribe": 1,
+                              "req_id": self.get_req_id()
+                          }
+                          self.ws.send(json.dumps(subscribe_request))
+                          logger.info(f"Subscribed to {pair} - {timeframe} candles")
+                          time.sleep(0.3)  # Rate limiting
+              
+              def get_granularity(self, timeframe: str) -> int:
+                  """Convert timeframe string to granularity in seconds"""
+                  granularities = {
+                      '5m': 300,
+                      '15m': 900,
+                      '30m': 1800,
+                      '45m': 2700
+                  }
+                  return granularities.get(timeframe, 300)
+              
+              def get_req_id(self):
+                  return int(time.time() * 1000) % 10000
+              
+              def on_message(self, ws, message):
+                  try:
+                      data = json.loads(message)
+                      
+                      if 'candles' in data:
+                          self.process_candle_data(data)
+                      elif 'tick' in data:
+                          self.process_tick(data)
+                      elif 'authorize' in data:
+                          if data['authorize']:
+                              logger.info("Authentication successful")
+                          else:
+                              logger.error("Authentication failed")
+                      
+                  except Exception as e:
+                      logger.error(f"Error processing message: {e}")
+              
+              def process_candle_data(self, data):
+                  try:
+                      candles = data.get('candles', [])
+                      granularity = data.get('granularity', 0)
+                      pair = data.get('ticks_history', 'frxEURUSD')
+                      
+                      timeframe = self.get_timeframe_from_granularity(granularity)
+                      
+                      if timeframe and candles:
+                          for candle in candles:
+                              self.update_ohlc(pair, timeframe, candle)
+                          
+                          # Analyze for sweeps and CHOCH
+                          self.analyze_market(pair, timeframe)
+                          
+                  except Exception as e:
+                      logger.error(f"Error processing candles: {e}")
+              
+              def get_timeframe_from_granularity(self, granularity: int) -> Optional[str]:
+                  mapping = {
+                      300: '5m',
+                      900: '15m',
+                      1800: '30m',
+                      2700: '45m'
+                  }
+                  return mapping.get(granularity)
+              
+              def update_ohlc(self, pair: str, timeframe: str, candle: Dict):
+                  """Update OHLC data for a specific pair and timeframe"""
+                  new_candle = {
+                      'timestamp': datetime.fromtimestamp(candle['epoch']),
+                      'open': float(candle['open']),
+                      'high': float(candle['high']),
+                      'low': float(candle['low']),
+                      'close': float(candle['close'])
+                  }
+                  
+                  self.ohlc_data[pair][timeframe] = pd.concat([
+                      self.ohlc_data[pair][timeframe],
+                      pd.DataFrame([new_candle])
+                  ], ignore_index=True)
+                  
+                  # Keep last 1000 candles
+                  if len(self.ohlc_data[pair][timeframe]) > 1000:
+                      self.ohlc_data[pair][timeframe] = self.ohlc_data[pair][timeframe].tail(1000)
+              
+              def analyze_market(self, pair: str, timeframe: str):
+                  """Analyze market for liquidity sweeps and CHOCH"""
+                  if len(self.ohlc_data[pair][timeframe]) < 10:
+                      return
+                  
+                  recent_data = self.ohlc_data[pair][timeframe].tail(20)
+                  current_price = recent_data.iloc[-1]['close']
+                  
+                  # Identify swing highs and lows
+                  swing_highs = self.find_swing_points(recent_data, 'high')
+                  swing_lows = self.find_swing_points(recent_data, 'low')
+                  
+                  # Check for liquidity sweeps
+                  sweep_detected = self.check_liquidity_sweep(
+                      pair, timeframe, current_price, swing_highs, swing_lows
+                  )
+                  if sweep_detected:
+                      self.process_sweep_and_trade(pair, timeframe, sweep_detected)
+              
+              def find_swing_points(self, data: pd.DataFrame, point_type: str) -> List[Dict]:
+                  swing_points = []
+                  prices = data[point_type].values
+                  
+                  for i in range(2, len(prices) - 2):
+                      if point_type == 'high':
+                          if prices[i] > prices[i-1] and prices[i] > prices[i-2] and \
+                             prices[i] > prices[i+1] and prices[i] > prices[i+2]:
+                              swing_points.append({
+                                  'price': prices[i],
+                                  'index': i,
+                                  'timestamp': data.iloc[i]['timestamp']
+                              })
+                      else:
+                          if prices[i] < prices[i-1] and prices[i] < prices[i-2] and \
+                             prices[i] < prices[i+1] and prices[i] < prices[i+2]:
+                              swing_points.append({
+                                  'price': prices[i],
+                                  'index': i,
+                                  'timestamp': data.iloc[i]['timestamp']
+                              })
+                  
+                  return swing_points
+              
+              def check_liquidity_sweep(self, pair: str, timeframe: str, current_price: float, 
+                                       highs: List[Dict], lows: List[Dict]) -> Optional[Dict]:
+                  
+                  for high_point in highs[-3:]:
+                      if current_price > high_point['price']:
+                          return {
+                              'swept_price': high_point['price'],
+                              'type': 'high',
+                              'timeframe': timeframe,
+                              'is_high_timeframe': timeframe in self.high_timeframes,
+                              'pair': pair
+                          }
+                  
+                  for low_point in lows[-3:]:
+                      if current_price < low_point['price']:
+                          return {
+                              'swept_price': low_point['price'],
+                              'type': 'low',
+                              'timeframe': timeframe,
+                              'is_high_timeframe': timeframe in self.high_timeframes,
+                              'pair': pair
+                          }
+                  
+                  return None
+              
+              def process_sweep_and_trade(self, pair: str, timeframe: str, sweep: Dict):
+                  """Process sweep and determine if trade should be taken"""
+                  
+                  logger.info(f"[{pair}] Sweep detected on {timeframe}: {sweep['type']} at {sweep['swept_price']:.5f}")
+                  
+                  # Check if pair is stopped due to consecutive losses
+                  if self.pair_stats[pair]['consecutive_losses'] >= 3:
+                      logger.warning(f"[{pair}] Stopped - 3 consecutive losses")
+                      return
+                  
+                  # Determine if we should check for CHOCH
+                  if sweep['is_high_timeframe']:
+                      if self.check_choch(pair, '3m', sweep):
+                          self.execute_trade(pair, sweep)
+                  else:
+                      if self.check_choch(pair, '1m', sweep) or self.check_choch(pair, '2m', sweep):
+                          self.execute_trade(pair, sweep)
+              
+              def check_choch(self, pair: str, ch_timeframe: str, sweep: Dict) -> bool:
+                  """Check for Change of Character (CHOCH)"""
+                  
+                  # For 1m and 2m, we need to approximate since Deriv doesn't provide them directly
+                  # Using 5m data as approximation or implement custom aggregation
+                  
+                  if ch_timeframe == '1m':
+                      # Use 5m data with shorter lookback
+                      data = self.ohlc_data[pair]['5m'].tail(3)
+                  elif ch_timeframe == '2m':
+                      data = self.ohlc_data[pair]['5m'].tail(5)
+                  else:  # 3m
+                      data = self.ohlc_data[pair]['5m'].tail(5)
+                  
+                  if len(data) < 3:
+                      return True
+                  
+                  current_price = data.iloc[-1]['close']
+                  previous_price = data.iloc[-2]['close']
+                  
+                  # Check for direction change based on sweep type
+                  if sweep['type'] == 'high':
+                      if current_price < previous_price:
+                          return True
+                  else:
+                      if current_price > previous_price:
+                          return True
+                  
+                  return False
+              
+              def execute_trade(self, pair: str, sweep: Dict):
+                  """Execute a trade based on sweep and CHOCH confirmation"""
+                  
+                  if self.is_stopped:
+                      logger.warning("Bot is stopped due to 3 consecutive losses")
+                      return
+                  
+                  if len(self.active_trades) >= self.max_concurrent_trades:
+                      logger.info(f"Max trades ({self.max_concurrent_trades}) already running")
+                      return
+                  
+                  # Determine trade direction
+                  if sweep['type'] == 'high':
+                      trade_type = 'sell'
+                  else:
+                      trade_type = 'buy'
+                  
+                  current_price = self.get_current_price(pair)
+                  if not current_price:
+                      return
+                  
+                  # Calculate stop loss in pips (forex standard)
+                  pip_value = self.get_pip_value(pair)
+                  sweep_distance = abs(current_price - sweep['swept_price'])
+                  
+                  # SL between 10-20 pips (converted to price)
+                  min_sl_pips = 10
+                  max_sl_pips = 20
+                  sl_pips = min(max(sweep_distance / pip_value * 1.5, min_sl_pips), max_sl_pips)
+                  stop_loss_distance = sl_pips * pip_value
+                  
+                  if trade_type == 'buy':
+                      stop_loss = current_price - stop_loss_distance
+                      if sl_pips <= 13:  # ~$0.50-$0.64 equivalent
+                          take_profit = current_price + (48 * pip_value)  # 48 pips ~ $2.40
+                      else:
+                          take_profit = current_price + (60 * pip_value)  # 60 pips ~ $3.00
+                  else:
+                      stop_loss = current_price + stop_loss_distance
+                      if sl_pips <= 13:
+                          take_profit = current_price - (48 * pip_value)
+                      else:
+                          take_profit = current_price - (60 * pip_value)
+                  
+                  # Create and execute trade
+                  trade = Trade(
+                      entry_price=current_price,
+                      stop_loss=stop_loss,
+                      take_profit=take_profit,
+                      entry_time=datetime.now(),
+                      trade_type=trade_type,
+                      timeframe=sweep['timeframe'],
+                      pair=pair
+                  )
+                  
+                  self.place_trade_order(trade)
+                  self.active_trades.append(trade)
+                  
+                  logger.info(f"[{pair}] Trade executed: {trade_type} at {current_price:.5f}, "
+                            f"SL: {stop_loss:.5f} ({sl_pips:.1f} pips), TP: {take_profit:.5f}")
+              
+              def get_pip_value(self, pair: str) -> float:
+                  """Get pip value for forex pair"""
+                  pip_values = {
+                      'frxEURUSD': 0.0001,
+                      'frxGBPUSD': 0.0001,
+                      'frxAUDUSD': 0.0001,
+                      'frxNZDUSD': 0.0001,
+                      'frxUSDJPY': 0.01,
+                      'frxUSDCAD': 0.0001,
+                      'frxUSDCHF': 0.0001
+                  }
+                  return pip_values.get(pair, 0.0001)
+              
+              def get_current_price(self, pair: str) -> Optional[float]:
+                  """Get current market price for a pair"""
+                  try:
+                      # Get latest close from 5m timeframe
+                      if len(self.ohlc_data[pair]['5m']) > 0:
+                          return self.ohlc_data[pair]['5m'].iloc[-1]['close']
+                      return 1.10000  # Default fallback
+                  except:
+                      return None
+              
+              def place_trade_order(self, trade: Trade):
+                  """Place actual trade order on Deriv"""
+                  logger.info(f"Placing {trade.trade_type} order for {trade.pair} @ {trade.entry_price:.5f}")
+                  
+                  # Start monitoring thread for this trade
+                  monitor_thread = threading.Thread(target=self.monitor_trade, args=(trade,))
+                  monitor_thread.daemon = True
+                  monitor_thread.start()
+              
+              def monitor_trade(self, trade: Trade):
+                  """Monitor trade for TP/SL hits"""
+                  while trade.status == 'open' and self.is_running:
+                      current_price = self.get_current_price(trade.pair)
+                      
+                      if not current_price:
+                          time.sleep(1)
+                          continue
+                      
+                      if trade.trade_type == 'buy':
+                          if current_price >= trade.take_profit:
+                              self.close_trade(trade, current_price, 'won')
+                              break
+                          elif current_price <= trade.stop_loss:
+                              self.close_trade(trade, current_price, 'lost')
+                              break
+                      else:
+                          if current_price <= trade.take_profit:
+                              self.close_trade(trade, current_price, 'won')
+                              break
+                          elif current_price >= trade.stop_loss:
+                              self.close_trade(trade, current_price, 'lost')
+                              break
+                      
+                      time.sleep(2)
+              
+              def close_trade(self, trade: Trade, exit_price: float, result: str):
+                  """Close a trade and update statistics"""
+                  trade.status = 'closed' if result == 'won' else 'lost'
+                  trade.exit_price = exit_price
+                  trade.exit_time = datetime.now()
+                  
+                  # Calculate profit/loss in pips
+                  if trade.trade_type == 'buy':
+                      pip_change = (exit_price - trade.entry_price) / self.get_pip_value(trade.pair)
+                  else:
+                      pip_change = (trade.entry_price - exit_price) / self.get_pip_value(trade.pair)
+                  
+                  trade.profit_loss = pip_change
+                  
+                  # Update global statistics
+                  self.total_trades += 1
+                  if result == 'won':
+                      self.wins += 1
+                      self.consecutive_losses = 0
+                      self.net_profit += pip_change
+                      logger.info(f"[{trade.pair}] Trade WON! Profit: {pip_change:.1f} pips")
+                  else:
+                      self.losses += 1
+                      self.consecutive_losses += 1
+                      self.net_profit += pip_change
+                      logger.info(f"[{trade.pair}] Trade LOST! Loss: {pip_change:.1f} pips")
+                      
+                      if self.consecutive_losses >= 3:
+                          self.is_stopped = True
+                          logger.warning("3 consecutive losses globally - STOPPING TRADING")
+                  
+                  # Update pair-specific statistics
+                  pair_stat = self.pair_stats[trade.pair]
+                  pair_stat['total_trades'] += 1
+                  if result == 'won':
+                      pair_stat['wins'] += 1
+                      pair_stat['consecutive_losses'] = 0
+                  else:
+                      pair_stat['losses'] += 1
+                      pair_stat['consecutive_losses'] += 1
+                  pair_stat['net_profit'] += pip_change
+                  
+                  # Remove from active trades
+                  self.active_trades.remove(trade)
+                  
+                  # Print statistics
+                  self.print_statistics()
+              
+              def print_statistics(self):
+                  """Print current trading statistics"""
+                  win_rate = (self.wins / self.total_trades * 100) if self.total_trades > 0 else 0
+                  
+                  stats = f"""
+                  ╔══════════════════════════════════════════════════════════════╗
+                  ║              simiyu_bot - MAJOR FOREX TRADING STATS          ║
+                  ╠══════════════════════════════════════════════════════════════╣
+                  ║ Total Trades: {self.total_trades}                                                 ║
+                  ║ Wins: {self.wins} | Losses: {self.losses} | Win Rate: {win_rate:.1f}%                      ║
+                  ║ Net Profit: {self.net_profit:.1f} pips                                            ║
+                  ║ Active Trades: {len(self.active_trades)} | Consecutive Losses: {self.consecutive_losses}            ║
+                  ║ Bot Status: {'STOPPED' if self.is_stopped else 'RUNNING'}                                        ║
+                  ╠══════════════════════════════════════════════════════════════╣
+                  ║ PAIR PERFORMANCE:                                           ║
+                  """
+                  
+                  for pair in self.forex_pairs:
+                      ps = self.pair_stats[pair]
+                      if ps['total_trades'] > 0:
+                          pair_win_rate = (ps['wins'] / ps['total_trades'] * 100)
+                          stats += f"\n║ {pair}: {ps['total_trades']} trades | {pair_win_rate:.0f}% win | {ps['net_profit']:.1f} pips"
+                      else:
+                          stats += f"\n║ {pair}: No trades yet"
+                  
+                  stats += "\n╚══════════════════════════════════════════════════════════════╝"
+                  
+                  logger.info(stats)
+                  
+                  # Also save to file
+                  with open('trading_stats.txt', 'w') as f:
+                      f.write(stats)
+              
+              def on_error(self, ws, error):
+                  logger.error(f"WebSocket error: {error}")
+              
+              def on_close(self, ws, close_status_code, close_msg):
+                  logger.warning("WebSocket connection closed")
+                  self.is_running = False
+              
+              def run(self):
+                  """Main bot loop"""
+                  logger.info("simiyu_bot - Major Forex Trading Bot Started")
+                  logger.info(f"Monitoring {len(self.forex_pairs)} major forex pairs")
+                  
+                  while self.is_running:
+                      time.sleep(1)
+                      
+                      # Print statistics every 5 minutes
+                      if int(time.time()) % 300 == 0:
+                          self.print_statistics()
+              
+              def process_tick(self, data):
+                  pass
+
+          def main():
+              API_TOKEN = "0XhlE5tsI6zdpFX"
+              APP_ID = "32ZFw49Z0RGY4UQGjIrhh"
+              ACCOUNT_TYPE = "VRTC11510184"
+              
+              bot = ForexLiquidityCHOCHBot(API_TOKEN, APP_ID, ACCOUNT_TYPE)
+              
+              try:
+                  bot.run()
+              except KeyboardInterrupt:
+                  logger.info("Bot stopped by user")
+                  bot.is_running = False
+              except Exception as e:
+                  logger.error(f"Bot crashed: {e}")
+              finally:
+                  bot.print_statistics()
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+      - name: Create requirements file
+        run: |
+          cat > requirements.txt << 'EOF'
+          deriv-api-python>=1.0.0
+          pandas>=1.5.0
+          numpy>=1.24.0
+          websocket-client>=1.5.0
+          requests>=2.31.0
+          python-dateutil>=2.8.2
+          EOF
+
+      - name: Create README
+        run: |
+          cat > README.md << 'EOF'
+          # simiyu_bot - Major Forex Trading Bot
+          
+          ## Trading All Major Forex Pairs:
+          - EUR/USD (frxEURUSD)
+          - GBP/USD (frxGBPUSD)  
+          - USD/JPY (frxUSDJPY)
+          - AUD/USD (frxAUDUSD)
+          - USD/CAD (frxUSDCAD)
+          - USD/CHF (frxUSDCHF)
+          - NZD/USD (frxNZDUSD)
+          
+          ## Strategy:
+          - Monitors all 7 pairs simultaneously
+          - Liquidity sweeps on 45m, 30m, 15m, 5m timeframes
+          - CHOCH confirmation on lower timeframes
+          - Dynamic SL: 10-20 pips based on sweep distance
+          - TP: 48 pips (for SL ≤13 pips) or 60 pips (for SL >13 pips)
+          
+          ## Risk Management:
+          - Max 3 concurrent trades across all pairs
+          - Independent loss tracking per pair
+          - Stops pair after 3 consecutive losses
+          - Global stop after 3 consecutive losses
+          
+          ## Installation:
+          ```bash
+          pip install -r requirements.txt
+          python simiyu_bot_forex.py
+          ```
+          EOF
+
+      - name: Package bot
+        run: |
+          tar -czf simiyu_bot_forex.tar.gz simiyu_bot_forex.py requirements.txt README.md
+
+      - name: Upload bot package
+        uses: actions/upload-artifact@v4
+        with:
+          name: simiyu_bot_forex
+          path: |
+            simiyu_bot_forex.tar.gz
+            simiyu_bot_forex.py
+            requirements.txt
+            README.md
