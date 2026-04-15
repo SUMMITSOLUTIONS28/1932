@@ -1,0 +1,364 @@
+name: Build Simiyu Trading Bot - Correct Credentials
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.0'
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/simiyu/tradingbot
+          mkdir -p app/src/main/res/values
+
+          cat > app/src/main/java/com/simiyu/tradingbot/MainActivity.java << 'EOF'
+          package com.simiyu.tradingbot;
+
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.widget.*;
+          import androidx.appcompat.app.AppCompatActivity;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.LinearLayout;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+          import org.json.JSONObject;
+          import okhttp3.*;
+          import java.util.concurrent.TimeUnit;
+
+          public class MainActivity extends AppCompatActivity {
+              private TextView statusText, balanceText, progressText, statsText, logText;
+              private LinearLayout mainLayout;
+              private Handler handler = new Handler();
+              
+              // YOUR CORRECT CREDENTIALS
+              private String API_TOKEN = "JtgIdLIAzlDpKDd";
+              private String APP_ID = "32ZFw4920RGY4UQgjIrhh";
+              private String WEBSOCKET_URL = "wss://ws.derivws.com/websockets/v3?app_id=" + APP_ID;
+              
+              // Account Data
+              private double currentBalance = 0;
+              private double initialBalance = 10000;
+              private boolean isConnected = false;
+              
+              private OkHttpClient client;
+              private WebSocket webSocket;
+              
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  createUI();
+                  connectToDeriv();
+              }
+              
+              private void createUI() {
+                  mainLayout = new LinearLayout(this);
+                  mainLayout.setOrientation(LinearLayout.VERTICAL);
+                  mainLayout.setPadding(25, 25, 25, 25);
+                  mainLayout.setBackgroundColor(Color.parseColor("#0a0a1a"));
+                  
+                  TextView title = new TextView(this);
+                  title.setText("🤖 SIMIYU TRADING BOT");
+                  title.setTextSize(26);
+                  title.setTextColor(Color.parseColor("#00ff88"));
+                  title.setGravity(Gravity.CENTER);
+                  title.setTypeface(null, Typeface.BOLD);
+                  title.setPadding(0, 10, 0, 20);
+                  mainLayout.addView(title);
+                  
+                  statusText = new TextView(this);
+                  statusText.setText("🔄 CONNECTING TO DERIV...");
+                  statusText.setTextSize(14);
+                  statusText.setTextColor(Color.parseColor("#ffd700"));
+                  statusText.setGravity(Gravity.CENTER);
+                  statusText.setPadding(0, 10, 0, 20);
+                  mainLayout.addView(statusText);
+                  
+                  // Balance Panel
+                  LinearLayout balancePanel = new LinearLayout(this);
+                  balancePanel.setOrientation(LinearLayout.VERTICAL);
+                  balancePanel.setPadding(20, 20, 20, 20);
+                  balancePanel.setBackgroundColor(Color.parseColor("#1a1a2e"));
+                  balancePanel.setLayoutParams(new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT));
+                  
+                  TextView balanceTitle = new TextView(this);
+                  balanceTitle.setText("💰 ACCOUNT BALANCE");
+                  balanceTitle.setTextSize(16);
+                  balanceTitle.setTextColor(Color.parseColor("#ffd700"));
+                  balanceTitle.setTypeface(null, Typeface.BOLD);
+                  balancePanel.addView(balanceTitle);
+                  
+                  balanceText = new TextView(this);
+                  balanceText.setText("$10,000.00");
+                  balanceText.setTextSize(24);
+                  balanceText.setTextColor(Color.parseColor("#00ff88"));
+                  balanceText.setTypeface(null, Typeface.BOLD);
+                  balanceText.setPadding(0, 15, 0, 0);
+                  balancePanel.addView(balanceText);
+                  mainLayout.addView(balancePanel);
+                  
+                  // Log
+                  TextView logTitle = new TextView(this);
+                  logTitle.setText("📝 LIVE TRADING LOG");
+                  logTitle.setTextSize(16);
+                  logTitle.setTextColor(Color.parseColor("#ffffff"));
+                  logTitle.setTypeface(null, Typeface.BOLD);
+                  logTitle.setPadding(0, 20, 0, 10);
+                  mainLayout.addView(logTitle);
+                  
+                  logText = new TextView(this);
+                  logText.setText("Starting bot with correct credentials...\n");
+                  logText.setTextSize(11);
+                  logText.setTextColor(Color.parseColor("#cccccc"));
+                  logText.setBackgroundColor(Color.parseColor("#16213e"));
+                  logText.setPadding(15, 15, 15, 15);
+                  logText.setMaxLines(15);
+                  mainLayout.addView(logText);
+                  
+                  setContentView(mainLayout);
+              }
+              
+              private void connectToDeriv() {
+                  addLog("🔌 Connecting to Deriv...");
+                  addLog("📱 App ID: " + APP_ID);
+                  
+                  client = new OkHttpClient.Builder()
+                      .connectTimeout(30, TimeUnit.SECONDS)
+                      .writeTimeout(30, TimeUnit.SECONDS)
+                      .readTimeout(30, TimeUnit.SECONDS)
+                      .build();
+                  
+                  Request request = new Request.Builder()
+                      .url(WEBSOCKET_URL)
+                      .build();
+                  
+                  webSocket = client.newWebSocket(request, new WebSocketListener() {
+                      @Override
+                      public void onOpen(WebSocket webSocket, okhttp3.Response response) {
+                          runOnUiThread(() -> {
+                              addLog("✅ WebSocket connected!");
+                              statusText.setText("🔐 AUTHENTICATING...");
+                          });
+                          
+                          JSONObject authMsg = new JSONObject();
+                          try {
+                              authMsg.put("authorize", API_TOKEN);
+                              webSocket.send(authMsg.toString());
+                              runOnUiThread(() -> addLog("📤 Authorization sent..."));
+                          } catch (Exception e) {
+                              runOnUiThread(() -> addLog("❌ Auth error: " + e.getMessage()));
+                          }
+                      }
+                      
+                      @Override
+                      public void onMessage(WebSocket webSocket, String text) {
+                          runOnUiThread(() -> {
+                              try {
+                                  JSONObject json = new JSONObject(text);
+                                  addLog("📥 Response received");
+                                  
+                                  if (json.has("authorize")) {
+                                      if (json.getInt("authorize") == 1) {
+                                          currentBalance = json.getDouble("balance");
+                                          balanceText.setText(String.format("$%,.2f", currentBalance));
+                                          addLog("✅ AUTHENTICATED SUCCESSFULLY!");
+                                          addLog("💰 Balance: $" + String.format("%,.2f", currentBalance));
+                                          statusText.setText("✅ CONNECTED - READY");
+                                          statusText.setTextColor(Color.parseColor("#00ff88"));
+                                          isConnected = true;
+                                      } else {
+                                          addLog("❌ Authorization failed");
+                                          statusText.setText("❌ AUTH FAILED");
+                                          statusText.setTextColor(Color.parseColor("#ff4444"));
+                                      }
+                                  }
+                                  
+                                  if (json.has("error")) {
+                                      String error = json.getJSONObject("error").getString("message");
+                                      addLog("❌ Error: " + error);
+                                  }
+                                  
+                                  if (json.has("balance")) {
+                                      currentBalance = json.getDouble("balance");
+                                      balanceText.setText(String.format("$%,.2f", currentBalance));
+                                  }
+                                  
+                              } catch (Exception e) {
+                                  addLog("Parse error: " + e.getMessage());
+                              }
+                          });
+                      }
+                      
+                      @Override
+                      public void onFailure(WebSocket webSocket, Throwable t, okhttp3.Response response) {
+                          runOnUiThread(() -> {
+                              addLog("❌ Connection error: " + t.getMessage());
+                              statusText.setText("⚠️ RETRYING...");
+                              handler.postDelayed(() -> connectToDeriv(), 5000);
+                          });
+                      }
+                      
+                      @Override
+                      public void onClosed(WebSocket webSocket, int code, String reason) {
+                          runOnUiThread(() -> {
+                              addLog("🔌 Connection closed");
+                              isConnected = false;
+                          });
+                      }
+                  });
+              }
+              
+              private void addLog(final String message) {
+                  runOnUiThread(() -> {
+                      String timestamp = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+                      String currentLog = logText.getText().toString();
+                      String newLog = "[" + timestamp + "] " + message + "\n" + currentLog;
+                      String[] lines = newLog.split("\n");
+                      if (lines.length > 25) {
+                          StringBuilder sb = new StringBuilder();
+                          for (int i = 0; i < 25; i++) sb.append(lines[i]).append("\n");
+                          newLog = sb.toString();
+                      }
+                      logText.setText(newLog);
+                  });
+              }
+              
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  if (webSocket != null) webSocket.close(1000, "App closed");
+                  handler.removeCallbacksAndMessages(null);
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/stat_sys_download"
+                  android:label="Simiyu Trading Bot"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.simiyu.tradingbot'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.simiyu.tradingbot"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+              implementation 'org.json:json:20230227'
+          }
+          EOF
+
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application' version '8.1.0' apply false
+          }
+          EOF
+
+          cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SimiyuTradingBot"
+          include ':app'
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.suppressUnsupportedCompileSdk=34
+          EOF
+
+      - name: Generate Gradle Wrapper
+        run: |
+          gradle wrapper --gradle-version 8.0 --distribution-type all
+          chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: simiyu-trading-bot-corrected
+          path: app/build/outputs/apk/debug/*.apk
