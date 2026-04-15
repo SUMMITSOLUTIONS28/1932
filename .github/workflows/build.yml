@@ -1,0 +1,526 @@
+name: Build simiyu Trading Bot App
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.0'
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/simiyu/tradingbot
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/drawable
+
+          # -------------------- MainActivity.java --------------------
+          cat > app/src/main/java/com/simiyu/tradingbot/MainActivity.java << 'EOF'
+          package com.simiyu.tradingbot;
+
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.widget.*;
+          import androidx.appcompat.app.AppCompatActivity;
+          import android.graphics.Color;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.LinearLayout;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+          import java.util.Random;
+
+          public class MainActivity extends AppCompatActivity {
+              private TextView statusText, statsText, tradesText;
+              private LinearLayout mainLayout;
+              private Handler handler = new Handler();
+              private Random random = new Random();
+              
+              // Trading bot variables
+              private int totalTrades = 0;
+              private int wins = 0;
+              private int losses = 0;
+              private double netProfit = 0;
+              private int activeTrades = 0;
+              private int consecutiveLosses = 0;
+              private boolean isRunning = true;
+              private boolean isStopped = false;
+              
+              // Forex pairs
+              private String[] forexPairs = {"EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD"};
+              private String[] pairSymbols = {"frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD", "frxUSDCAD", "frxUSDCHF", "frxNZDUSD"};
+              
+              // Timeframes
+              private String[] timeframes = {"5m", "15m", "30m", "45m"};
+              private String[] highTimeframes = {"45m", "30m"};
+              private String[] lowTimeframes = {"15m", "5m"};
+              
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  
+                  // Create main layout
+                  mainLayout = new LinearLayout(this);
+                  mainLayout.setOrientation(LinearLayout.VERTICAL);
+                  mainLayout.setPadding(30, 30, 30, 30);
+                  mainLayout.setBackgroundColor(Color.parseColor("#1a1a2e"));
+                  
+                  // Title
+                  TextView titleText = new TextView(this);
+                  titleText.setText("🤖 SIMIYU TRADING BOT");
+                  titleText.setTextSize(28);
+                  titleText.setTextColor(Color.parseColor("#00ff88"));
+                  titleText.setGravity(Gravity.CENTER);
+                  titleText.setTypeface(null, android.graphics.Typeface.BOLD);
+                  titleText.setPadding(0, 20, 0, 30);
+                  mainLayout.addView(titleText);
+                  
+                  // Status panel
+                  LinearLayout statusPanel = createStatusPanel();
+                  mainLayout.addView(statusPanel);
+                  
+                  // Stats panel
+                  LinearLayout statsPanel = createStatsPanel();
+                  mainLayout.addView(statsPanel);
+                  
+                  // Active trades panel
+                  TextView tradesTitle = new TextView(this);
+                  tradesTitle.setText("📊 ACTIVE TRADES");
+                  tradesTitle.setTextSize(18);
+                  tradesTitle.setTextColor(Color.parseColor("#ffffff"));
+                  tradesTitle.setPadding(0, 30, 0, 10);
+                  mainLayout.addView(tradesTitle);
+                  
+                  tradesText = new TextView(this);
+                  tradesText.setText("No active trades");
+                  tradesText.setTextSize(14);
+                  tradesText.setTextColor(Color.parseColor("#aaaaaa"));
+                  tradesText.setPadding(20, 10, 20, 10);
+                  tradesText.setBackgroundColor(Color.parseColor("#16213e"));
+                  mainLayout.addView(tradesText);
+                  
+                  // Log panel
+                  TextView logTitle = new TextView(this);
+                  logTitle.setText("📝 TRADING LOG");
+                  logTitle.setTextSize(18);
+                  logTitle.setTextColor(Color.parseColor("#ffffff"));
+                  logTitle.setPadding(0, 30, 0, 10);
+                  mainLayout.addView(logTitle);
+                  
+                  final TextView logText = new TextView(this);
+                  logText.setText("Bot started - Monitoring " + forexPairs.length + " forex pairs...\n");
+                  logText.setTextSize(12);
+                  logText.setTextColor(Color.parseColor("#cccccc"));
+                  logText.setPadding(20, 10, 20, 10);
+                  logText.setBackgroundColor(Color.parseColor("#16213e"));
+                  logText.setMaxLines(15);
+                  mainLayout.addView(logText);
+                  
+                  // Control buttons
+                  LinearLayout buttonLayout = new LinearLayout(this);
+                  buttonLayout.setOrientation(LinearLayout.HORIZONTAL);
+                  buttonLayout.setPadding(0, 30, 0, 0);
+                  
+                  Button stopButton = new Button(this);
+                  stopButton.setText("STOP BOT");
+                  stopButton.setBackgroundColor(Color.parseColor("#e74c3c"));
+                  stopButton.setTextColor(Color.WHITE);
+                  stopButton.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          isStopped = true;
+                          addLog("⚠️ BOT STOPPED MANUALLY", logText);
+                          statusText.setText("STATUS: STOPPED");
+                          statusText.setTextColor(Color.parseColor("#e74c3c"));
+                      }
+                  });
+                  
+                  Button resetButton = new Button(this);
+                  resetButton.setText("RESET STATS");
+                  resetButton.setBackgroundColor(Color.parseColor("#f39c12"));
+                  resetButton.setTextColor(Color.WHITE);
+                  resetButton.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          resetStats();
+                          addLog("📊 Statistics reset", logText);
+                          updateStatsDisplay();
+                      }
+                  });
+                  
+                  LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
+                      0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+                  buttonParams.setMargins(10, 0, 10, 0);
+                  stopButton.setLayoutParams(buttonParams);
+                  resetButton.setLayoutParams(buttonParams);
+                  
+                  buttonLayout.addView(stopButton);
+                  buttonLayout.addView(resetButton);
+                  mainLayout.addView(buttonLayout);
+                  
+                  setContentView(mainLayout);
+                  
+                  // Start trading bot
+                  startTradingBot(logText);
+              }
+              
+              private LinearLayout createStatusPanel() {
+                  LinearLayout panel = new LinearLayout(this);
+                  panel.setOrientation(LinearLayout.VERTICAL);
+                  panel.setPadding(20, 15, 20, 15);
+                  panel.setBackgroundColor(Color.parseColor("#16213e"));
+                  panel.setLayoutParams(new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  ));
+                  
+                  TextView statusTitle = new TextView(this);
+                  statusTitle.setText("⚡ BOT STATUS");
+                  statusTitle.setTextSize(16);
+                  statusTitle.setTextColor(Color.parseColor("#00ff88"));
+                  statusTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+                  panel.addView(statusTitle);
+                  
+                  statusText = new TextView(this);
+                  statusText.setText("STATUS: RUNNING");
+                  statusText.setTextSize(14);
+                  statusText.setTextColor(Color.parseColor("#00ff88"));
+                  statusText.setPadding(0, 10, 0, 5);
+                  panel.addView(statusText);
+                  
+                  TextView pairsText = new TextView(this);
+                  pairsText.setText("MONITORING: " + forexPairs.length + " major forex pairs");
+                  pairsText.setTextSize(12);
+                  pairsText.setTextColor(Color.parseColor("#aaaaaa"));
+                  panel.addView(pairsText);
+                  
+                  TextView timeframesText = new TextView(this);
+                  timeframesText.setText("TIMEFRAMES: 5m, 15m, 30m, 45m");
+                  timeframesText.setTextSize(12);
+                  timeframesText.setTextColor(Color.parseColor("#aaaaaa"));
+                  panel.addView(timeframesText);
+                  
+                  return panel;
+              }
+              
+              private LinearLayout createStatsPanel() {
+                  LinearLayout panel = new LinearLayout(this);
+                  panel.setOrientation(LinearLayout.VERTICAL);
+                  panel.setPadding(20, 15, 20, 15);
+                  panel.setBackgroundColor(Color.parseColor("#16213e"));
+                  panel.setLayoutParams(new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  ));
+                  panel.setPadding(20, 15, 20, 15);
+                  
+                  TextView statsTitle = new TextView(this);
+                  statsTitle.setText("📈 TRADING STATISTICS");
+                  statsTitle.setTextSize(16);
+                  statsTitle.setTextColor(Color.parseColor("#00ff88"));
+                  statsTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+                  panel.addView(statsTitle);
+                  
+                  statsText = new TextView(this);
+                  updateStatsDisplay();
+                  statsText.setTextSize(13);
+                  statsText.setTextColor(Color.parseColor("#ffffff"));
+                  statsText.setPadding(0, 10, 0, 0);
+                  panel.addView(statsText);
+                  
+                  return panel;
+              }
+              
+              private void updateStatsDisplay() {
+                  double winRate = totalTrades > 0 ? (wins * 100.0 / totalTrades) : 0;
+                  statsText.setText(
+                      "Total Trades: " + totalTrades + "\n" +
+                      "Wins: " + wins + " | Losses: " + losses + "\n" +
+                      "Win Rate: " + String.format("%.1f", winRate) + "%\n" +
+                      "Net Profit: " + String.format("%.1f", netProfit) + " pips\n" +
+                      "Active Trades: " + activeTrades + "/3\n" +
+                      "Consecutive Losses: " + consecutiveLosses
+                  );
+              }
+              
+              private void resetStats() {
+                  totalTrades = 0;
+                  wins = 0;
+                  losses = 0;
+                  netProfit = 0;
+                  activeTrades = 0;
+                  consecutiveLosses = 0;
+                  isStopped = false;
+                  updateStatsDisplay();
+                  statusText.setText("STATUS: RUNNING");
+                  statusText.setTextColor(Color.parseColor("#00ff88"));
+              }
+              
+              private void startTradingBot(final TextView logText) {
+                  handler.postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          if (isStopped) return;
+                          
+                          // Simulate market analysis for each pair
+                          for (int i = 0; i < forexPairs.length && !isStopped; i++) {
+                              String pair = forexPairs[i];
+                              
+                              // Random chance to detect sweep (simulated)
+                              if (random.nextInt(100) < 15 && activeTrades < 3) {
+                                  String timeframe = timeframes[random.nextInt(timeframes.length)];
+                                  String sweepType = random.nextBoolean() ? "HIGH" : "LOW";
+                                  
+                                  addLog("📍 " + pair + " - Liquidity sweep detected on " + timeframe + " (" + sweepType + ")", logText);
+                                  
+                                  // Check CHOCH (simulated)
+                                  if (random.nextInt(100) < 70) {
+                                      addLog("✅ " + pair + " - CHOCH confirmed!", logText);
+                                      executeTrade(pair, sweepType, logText);
+                                  }
+                              }
+                          }
+                          
+                          // Update active trades display
+                          updateTradesDisplay(logText);
+                          
+                          // Run again every 10 seconds
+                          handler.postDelayed(this, 10000);
+                      }
+                  }, 5000);
+              }
+              
+              private void executeTrade(String pair, String sweepType, TextView logText) {
+                  if (activeTrades >= 3) {
+                      addLog("⚠️ Max trades (3) already active - waiting", logText);
+                      return;
+                  }
+                  
+                  String tradeType = sweepType.equals("HIGH") ? "SELL" : "BUY";
+                  double entryPrice = 1.1000 + (random.nextDouble() * 0.01);
+                  double slPips = 10 + random.nextInt(11); // 10-20 pips
+                  double tpPips = slPips <= 13 ? 48 : 60;
+                  
+                  activeTrades++;
+                  
+                  String tradeInfo = String.format(Locale.US,
+                      "🎯 TRADE: %s %s @ %.5f | SL: %.1f pips | TP: %.0f pips",
+                      pair, tradeType, entryPrice, slPips, tpPips);
+                  addLog(tradeInfo, logText);
+                  addLog("─────────────────────────────────────", logText);
+                  
+                  // Update trades display
+                  String trades = "";
+                  for (int i = 0; i < activeTrades; i++) {
+                      trades += "• " + pair + " " + tradeType + " @ " + String.format("%.5f", entryPrice) + "\n";
+                  }
+                  tradesText.setText(trades.isEmpty() ? "No active trades" : trades);
+                  
+                  // Simulate trade result after random time
+                  simulateTradeResult(pair, tradeType, slPips, tpPips, logText);
+              }
+              
+              private void simulateTradeResult(final String pair, final String tradeType, 
+                                              final double slPips, final double tpPips, 
+                                              final TextView logText) {
+                  handler.postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          if (isStopped) return;
+                          
+                          activeTrades--;
+                          boolean isWin = random.nextInt(100) < 55; // 55% win rate
+                          
+                          if (isWin) {
+                              wins++;
+                              netProfit += tpPips;
+                              addLog("🏆 " + pair + " - TRADE WON! +" + String.format("%.0f", tpPips) + " pips", logText);
+                              consecutiveLosses = 0;
+                          } else {
+                              losses++;
+                              netProfit -= slPips;
+                              addLog("📉 " + pair + " - TRADE LOST! -" + String.format("%.1f", slPips) + " pips", logText);
+                              consecutiveLosses++;
+                              
+                              if (consecutiveLosses >= 3) {
+                                  isStopped = true;
+                                  addLog("🛑 3 CONSECUTIVE LOSSES - TRADING STOPPED", logText);
+                                  statusText.setText("STATUS: STOPPED");
+                                  statusText.setTextColor(Color.parseColor("#e74c3c"));
+                              }
+                          }
+                          
+                          totalTrades++;
+                          updateStatsDisplay();
+                          updateTradesDisplay(logText);
+                          
+                          addLog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", logText);
+                      }
+                  }, 30000 + random.nextInt(60000)); // 30-90 seconds
+              }
+              
+              private void updateTradesDisplay(TextView logText) {
+                  if (activeTrades == 0) {
+                      tradesText.setText("No active trades");
+                  }
+              }
+              
+              private void addLog(final String message, final TextView logText) {
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          String timestamp = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+                          String currentLog = logText.getText().toString();
+                          String newLog = "[" + timestamp + "] " + message + "\n" + currentLog;
+                          
+                          // Keep only last 30 lines
+                          String[] lines = newLog.split("\n");
+                          if (lines.length > 30) {
+                              StringBuilder sb = new StringBuilder();
+                              for (int i = 0; i < 30; i++) {
+                                  sb.append(lines[i]).append("\n");
+                              }
+                              newLog = sb.toString();
+                          }
+                          
+                          logText.setText(newLog);
+                      }
+                  });
+              }
+              
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  handler.removeCallbacksAndMessages(null);
+              }
+          }
+          EOF
+
+          # -------------------- AndroidManifest.xml --------------------
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.simiyu.tradingbot">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/stat_sys_download"
+                  android:label="Simiyu Trading Bot"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+
+          </manifest>
+          EOF
+
+          # -------------------- build.gradle (root) --------------------
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.1.0'
+              }
+          }
+          EOF
+
+          # -------------------- settings.gradle --------------------
+          cat > settings.gradle << 'EOF'
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SimiyuTradingBot"
+          include ':app'
+          EOF
+
+          # -------------------- app/build.gradle --------------------
+          cat > app/build.gradle << 'EOF'
+          apply plugin: 'com.android.application'
+
+          android {
+              namespace 'com.simiyu.tradingbot'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.simiyu.tradingbot"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+          }
+          EOF
+
+          # -------------------- gradle.properties --------------------
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          EOF
+
+      - name: Generate Gradle Wrapper
+        run: |
+          gradle wrapper --gradle-version 8.0 --distribution-type all
+          chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: simiyu-trading-bot-app
+          path: app/build/outputs/apk/debug/*.apk
