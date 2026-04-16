@@ -1,0 +1,335 @@
+name: Build Simiyu Trading Bot - Public Endpoint
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.0'
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/simiyu/tradingbot
+          mkdir -p app/src/main/res/values
+
+          cat > app/src/main/java/com/simiyu/tradingbot/MainActivity.java << 'EOF'
+          package com.simiyu.tradingbot;
+
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.widget.*;
+          import androidx.appcompat.app.AppCompatActivity;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.view.Gravity;
+          import android.widget.LinearLayout;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+          import org.json.JSONObject;
+          import okhttp3.*;
+          import java.util.concurrent.TimeUnit;
+
+          public class MainActivity extends AppCompatActivity {
+              private TextView statusText, logText;
+              private LinearLayout mainLayout;
+              private Handler handler = new Handler();
+              
+              // PUBLIC ENDPOINT - No authentication needed
+              private String WEBSOCKET_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089";
+              
+              private OkHttpClient client;
+              private WebSocket webSocket;
+              
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  createUI();
+                  connectToDeriv();
+              }
+              
+              private void createUI() {
+                  mainLayout = new LinearLayout(this);
+                  mainLayout.setOrientation(LinearLayout.VERTICAL);
+                  mainLayout.setPadding(25, 25, 25, 25);
+                  mainLayout.setBackgroundColor(Color.parseColor("#0a0a1a"));
+                  
+                  TextView title = new TextView(this);
+                  title.setText("🤖 SIMIYU TRADING BOT");
+                  title.setTextSize(26);
+                  title.setTextColor(Color.parseColor("#00ff88"));
+                  title.setGravity(Gravity.CENTER);
+                  title.setTypeface(null, Typeface.BOLD);
+                  title.setPadding(0, 10, 0, 20);
+                  mainLayout.addView(title);
+                  
+                  statusText = new TextView(this);
+                  statusText.setText("🔄 CONNECTING TO PUBLIC DERIV...");
+                  statusText.setTextSize(14);
+                  statusText.setTextColor(Color.parseColor("#ffd700"));
+                  statusText.setGravity(Gravity.CENTER);
+                  statusText.setPadding(0, 10, 0, 20);
+                  mainLayout.addView(statusText);
+                  
+                  // Info Panel
+                  LinearLayout infoPanel = new LinearLayout(this);
+                  infoPanel.setOrientation(LinearLayout.VERTICAL);
+                  infoPanel.setPadding(20, 20, 20, 20);
+                  infoPanel.setBackgroundColor(Color.parseColor("#1a1a2e"));
+                  infoPanel.setLayoutParams(new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT));
+                  
+                  TextView infoTitle = new TextView(this);
+                  infoTitle.setText("📡 PUBLIC ENDPOINT");
+                  infoTitle.setTextSize(16);
+                  infoTitle.setTextColor(Color.parseColor("#ffd700"));
+                  infoTitle.setTypeface(null, Typeface.BOLD);
+                  infoPanel.addView(infoTitle);
+                  
+                  TextView infoText = new TextView(this);
+                  infoText.setText("App ID: 1089 (Public Demo)\nNo authentication required\nReceiving public market data");
+                  infoText.setTextSize(12);
+                  infoText.setTextColor(Color.parseColor("#cccccc"));
+                  infoText.setPadding(0, 10, 0, 0);
+                  infoPanel.addView(infoText);
+                  mainLayout.addView(infoPanel);
+                  
+                  // Log
+                  TextView logTitle = new TextView(this);
+                  logTitle.setText("📝 LIVE TRADING LOG");
+                  logTitle.setTextSize(16);
+                  logTitle.setTextColor(Color.parseColor("#ffffff"));
+                  logTitle.setTypeface(null, Typeface.BOLD);
+                  logTitle.setPadding(0, 20, 0, 10);
+                  mainLayout.addView(logTitle);
+                  
+                  logText = new TextView(this);
+                  logText.setText("Starting bot with PUBLIC endpoint...\n");
+                  logText.setTextSize(11);
+                  logText.setTextColor(Color.parseColor("#cccccc"));
+                  logText.setBackgroundColor(Color.parseColor("#16213e"));
+                  logText.setPadding(15, 15, 15, 15);
+                  logText.setMaxLines(15);
+                  mainLayout.addView(logText);
+                  
+                  setContentView(mainLayout);
+              }
+              
+              private void connectToDeriv() {
+                  addLog("🔌 Connecting to Deriv Public Endpoint...");
+                  addLog("📱 URL: " + WEBSOCKET_URL);
+                  
+                  Request request = new Request.Builder()
+                      .url(WEBSOCKET_URL)
+                      .build();
+                  
+                  client = new OkHttpClient.Builder()
+                      .connectTimeout(30, TimeUnit.SECONDS)
+                      .writeTimeout(30, TimeUnit.SECONDS)
+                      .readTimeout(30, TimeUnit.SECONDS)
+                      .build();
+                  
+                  webSocket = client.newWebSocket(request, new WebSocketListener() {
+                      @Override
+                      public void onOpen(WebSocket webSocket, okhttp3.Response response) {
+                          runOnUiThread(() -> {
+                              addLog("✅ WebSocket connected to public endpoint!");
+                              statusText.setText("✅ CONNECTED - PUBLIC DATA");
+                              statusText.setTextColor(Color.parseColor("#00ff88"));
+                              
+                              // Request public data
+                              JSONObject timeMsg = new JSONObject();
+                              try {
+                                  timeMsg.put("time", 1);
+                                  webSocket.send(timeMsg.toString());
+                                  addLog("📤 Requesting server time...");
+                              } catch (Exception e) {
+                                  addLog("❌ Error: " + e.getMessage());
+                              }
+                          });
+                      }
+                      
+                      @Override
+                      public void onMessage(WebSocket webSocket, String text) {
+                          runOnUiThread(() -> {
+                              try {
+                                  JSONObject json = new JSONObject(text);
+                                  addLog("📥 " + text.substring(0, Math.min(80, text.length())));
+                                  
+                                  if (json.has("time")) {
+                                      long epochTime = json.getLong("time");
+                                      addLog("✅ Server time received: " + epochTime);
+                                      addLog("🎉 Public endpoint is working!");
+                                      statusText.setText("✅ CONNECTED - READY");
+                                  }
+                                  
+                                  if (json.has("error")) {
+                                      String error = json.getJSONObject("error").getString("message");
+                                      addLog("❌ Error: " + error);
+                                  }
+                                  
+                              } catch (Exception e) {
+                                  addLog("Parse error: " + e.getMessage());
+                              }
+                          });
+                      }
+                      
+                      @Override
+                      public void onFailure(WebSocket webSocket, Throwable t, okhttp3.Response response) {
+                          runOnUiThread(() -> {
+                              addLog("❌ Connection error: " + t.getMessage());
+                              statusText.setText("⚠️ RETRYING...");
+                              handler.postDelayed(() -> connectToDeriv(), 5000);
+                          });
+                      }
+                  });
+              }
+              
+              private void addLog(final String message) {
+                  runOnUiThread(() -> {
+                      String timestamp = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+                      String currentLog = logText.getText().toString();
+                      String newLog = "[" + timestamp + "] " + message + "\n" + currentLog;
+                      String[] lines = newLog.split("\n");
+                      if (lines.length > 30) {
+                          StringBuilder sb = new StringBuilder();
+                          for (int i = 0; i < 30; i++) sb.append(lines[i]).append("\n");
+                          newLog = sb.toString();
+                      }
+                      logText.setText(newLog);
+                  });
+              }
+              
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  if (webSocket != null) webSocket.close(1000, "App closed");
+                  handler.removeCallbacksAndMessages(null);
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/stat_sys_download"
+                  android:label="Simiyu Trading Bot"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.simiyu.tradingbot'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.simiyu.tradingbot"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+              implementation 'org.json:json:20230227'
+          }
+          EOF
+
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application' version '8.1.0' apply false
+          }
+          EOF
+
+          cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SimiyuTradingBot"
+          include ':app'
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.suppressUnsupportedCompileSdk=34
+          EOF
+
+      - name: Generate Gradle Wrapper
+        run: |
+          gradle wrapper --gradle-version 8.0 --distribution-type all
+          chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: simiyu-bot-public
+          path: app/build/outputs/apk/debug/*.apk
