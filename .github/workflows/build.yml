@@ -1,0 +1,598 @@
+name: Build SIMIYUFX - Background Trading Service
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.0'
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/simiyufx
+          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+
+          # ----- Launcher icon (orange circle) -----
+          cat > app/src/main/res/drawable/ic_launcher.xml << 'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="48dp"
+              android:height="48dp"
+              android:viewportWidth="48"
+              android:viewportHeight="48">
+            <path
+                android:fillColor="#FF9800"
+                android:pathData="M24,4 C12,4 4,12 4,24 C4,36 12,44 24,44 C36,44 44,36 44,24 C44,12 36,4 24,4 Z"/>
+          </vector>
+          EOF
+
+          # ----- TradingService.java (background service with full strategy) -----
+          cat > app/src/main/java/com/simiyufx/TradingService.java << 'EOF'
+          package com.simiyufx;
+
+          import android.app.*;
+          import android.content.*;
+          import android.net.ConnectivityManager;
+          import android.net.NetworkCapabilities;
+          import android.os.*;
+          import android.util.Log;
+          import androidx.core.app.NotificationCompat;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.net.http.*;
+          import java.net.URI;
+          import java.util.*;
+          import java.util.concurrent.*;
+          import okhttp3.*;
+          import okio.ByteString;
+
+          public class TradingService extends Service {
+              private static final String WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089";
+              private static final List<String> SYMBOLS = Arrays.asList(
+                  "frxEURUSD","frxUSDJPY","frxGBPUSD","frxUSDCHF","frxUSDCAD",
+                  "frxAUDUSD","frxNZDUSD","frxEURGBP","frxEURJPY","frxEURCHF",
+                  "frxEURAUD","frxEURCAD","frxEURNZD","frxGBPJPY","frxGBPCHF",
+                  "frxGBPAUD","frxGBPCAD","frxAUDJPY","frxAUDCAD","frxNZDJPY","frxCADJPY"
+              );
+              private static final Map<Integer,Integer> GRANULARITY_MAP = new HashMap<>();
+              static {
+                  GRANULARITY_MAP.put(1,60); GRANULARITY_MAP.put(2,120);
+                  GRANULARITY_MAP.put(5,300); GRANULARITY_MAP.put(15,900);
+                  GRANULARITY_MAP.put(30,1800); GRANULARITY_MAP.put(45,2700);
+              }
+              private WebSocket webSocket;
+              private String apiToken = "";
+              private boolean isConnected = false;
+              private double balance = 0;
+              private String currency = "USD";
+              private boolean isVirtual = true;
+              private String loginId = "";
+              private final Map<String, Map<Integer, List<JSONObject>>> candleHistory = new ConcurrentHashMap<>();
+              private final Map<String, List<JSONObject>> activeSweeps = new ConcurrentHashMap<>();
+              private final List<JSONObject> openTrades = new ArrayList<>();
+              private final List<JSONObject> tradeHistory = new ArrayList<>();
+              private int consecutiveLosses = 0;
+              private boolean tradingEnabled = true;
+              private final int MAX_OPEN_TRADES = 3;
+              private final Handler mainHandler = new Handler(Looper.getMainLooper());
+              private ConnectivityManager.NetworkCallback networkCallback;
+              private boolean lastNetworkState = true;
+
+              private final OkHttpClient client = new OkHttpClient.Builder()
+                  .pingInterval(30, TimeUnit.SECONDS)
+                  .build();
+
+              private final okhttp3.WebSocketListener webSocketListener = new okhttp3.WebSocketListener() {
+                  @Override public void onOpen(okhttp3.WebSocket webSocket, okhttp3.Response response) { authorize(); }
+                  @Override public void onMessage(okhttp3.WebSocket webSocket, String text) { handleMessage(text); }
+                  @Override public void onClosed(okhttp3.WebSocket webSocket, int code, String reason) { disconnect(); }
+                  @Override public void onFailure(okhttp3.WebSocket webSocket, Throwable t, okhttp3.Response response) { reconnect(); }
+              };
+
+              private void authorize() { sendJson(new JSONObject().put("authorize", apiToken)); }
+              private void sendJson(JSONObject obj) { if (webSocket != null) webSocket.send(obj.toString()); }
+
+              private void handleMessage(String text) {
+                  try {
+                      JSONObject json = new JSONObject(text);
+                      if (json.has("error")) { Log.e("TradingService", json.getString("error")); return; }
+                      String type = json.optString("msg_type");
+                      if ("authorize".equals(type)) {
+                          JSONObject auth = json.getJSONObject("authorize");
+                          balance = auth.getDouble("balance");
+                          currency = auth.optString("currency", "USD");
+                          isVirtual = auth.optBoolean("is_virtual", true);
+                          loginId = auth.optString("loginid", "");
+                          isConnected = true;
+                          subscribeToCandles();
+                          broadcastState();
+                      } else if ("candle".equals(type)) {
+                          JSONObject candle = json.getJSONObject("candle");
+                          String symbol = candle.getString("symbol");
+                          int granularity = candle.getInt("granularity");
+                          int tf = getTimeframeFromGranularity(granularity);
+                          if (tf == 0) return;
+                          JSONObject newCandle = new JSONObject();
+                          newCandle.put("open", candle.getDouble("open"));
+                          newCandle.put("high", candle.getDouble("high"));
+                          newCandle.put("low", candle.getDouble("low"));
+                          newCandle.put("close", candle.getDouble("close"));
+                          newCandle.put("epoch", candle.getLong("epoch"));
+                          candleHistory.computeIfAbsent(symbol, k -> new ConcurrentHashMap<>())
+                              .computeIfAbsent(tf, k -> new ArrayList<>()).add(newCandle);
+                          List<JSONObject> candles = candleHistory.get(symbol).get(tf);
+                          if (candles.size() > 100) candles.remove(0);
+                          // Detect sweep on higher TFs
+                          if (Arrays.asList(45,30,15,5).contains(tf) && candles.size() >= 2) {
+                              JSONObject prev = candles.get(candles.size()-2);
+                              JSONObject sweep = detectSweep(newCandle, prev);
+                              if (sweep != null) addSweep(symbol, tf, sweep);
+                          }
+                          // Check CHOCH on 1m/2m
+                          if (Arrays.asList(1,2).contains(tf) && candles.size() >= 3) {
+                              JSONObject choch = checkCHOCH(symbol, tf, candles);
+                              if (choch != null) {
+                                  double currentPrice = newCandle.getDouble("close");
+                                  executeTrade(symbol, choch.getString("direction"), choch.getDouble("rr"), currentPrice);
+                              }
+                          }
+                      } else if ("buy".equals(type)) {
+                          // Trade executed – we would listen for contract closure in production
+                          broadcastState();
+                      }
+                  } catch (Exception e) { Log.e("TradingService", "Message error", e); }
+              }
+
+              private JSONObject detectSweep(JSONObject newCandle, JSONObject prev) throws Exception {
+                  double newHigh = newCandle.getDouble("high"), newLow = newCandle.getDouble("low");
+                  double newClose = newCandle.getDouble("close");
+                  double prevHigh = prev.getDouble("high"), prevLow = prev.getDouble("low");
+                  if (newHigh > prevHigh && newClose < prevHigh) {
+                      JSONObject sweep = new JSONObject();
+                      sweep.put("type", "bearish");
+                      sweep.put("level", prevHigh);
+                      return sweep;
+                  }
+                  if (newLow < prevLow && newClose > prevLow) {
+                      JSONObject sweep = new JSONObject();
+                      sweep.put("type", "bullish");
+                      sweep.put("level", prevLow);
+                      return sweep;
+                  }
+                  return null;
+              }
+
+              private void addSweep(String symbol, int tf, JSONObject sweep) {
+                  List<JSONObject> sweeps = activeSweeps.computeIfAbsent(symbol, k -> new ArrayList<>());
+                  long now = System.currentTimeMillis();
+                  sweeps.removeIf(s -> (now - s.optLong("timestamp",0)) > tf * 60 * 1000L * 5);
+                  sweep.put("timeframe", tf);
+                  sweep.put("timestamp", now);
+                  sweeps.add(sweep);
+                  sweeps.sort((a,b) -> Integer.compare(b.optInt("timeframe"), a.optInt("timeframe")));
+                  if (sweeps.size() > 1) sweeps.subList(1, sweeps.size()).clear();
+              }
+
+              private JSONObject checkCHOCH(String symbol, int execTF, List<JSONObject> candles) throws Exception {
+                  if (!activeSweeps.containsKey(symbol) || activeSweeps.get(symbol).isEmpty()) return null;
+                  JSONObject sweep = activeSweeps.get(symbol).get(0);
+                  JSONObject prev = candles.get(candles.size()-2);
+                  JSONObject prevPrev = candles.get(candles.size()-3);
+                  JSONObject current = candles.get(candles.size()-1);
+                  boolean chochValid = false;
+                  String direction = "";
+                  if ("bearish".equals(sweep.getString("type"))) {
+                      if (current.getDouble("low") > prev.getDouble("low") && current.getDouble("close") > prev.getDouble("high"))
+                          chochValid = true;
+                      else if (current.getDouble("close") > Math.max(prev.getDouble("high"), prevPrev.getDouble("high")))
+                          chochValid = true;
+                      if (chochValid) direction = "CALL";
+                  } else if ("bullish".equals(sweep.getString("type"))) {
+                      if (current.getDouble("high") < prev.getDouble("high") && current.getDouble("close") < prev.getDouble("low"))
+                          chochValid = true;
+                      else if (current.getDouble("close") < Math.min(prev.getDouble("low"), prevPrev.getDouble("low")))
+                          chochValid = true;
+                      if (chochValid) direction = "PUT";
+                  }
+                  if (chochValid) {
+                      double rr = 3.0;
+                      int sweepTF = sweep.getInt("timeframe");
+                      if (sweepTF >= 30) rr = 4.0;
+                      else if (sweepTF == 15) rr = (execTF == 1) ? 4.0 : 3.0;
+                      else if (sweepTF == 5) rr = (execTF == 1) ? 3.0 : 3.5;
+                      JSONObject result = new JSONObject();
+                      result.put("direction", direction);
+                      result.put("rr", rr);
+                      result.put("sweepLevel", sweep.getDouble("level"));
+                      activeSweeps.remove(symbol);
+                      return result;
+                  }
+                  return null;
+              }
+
+              private void executeTrade(String symbol, String direction, double rr, double price) {
+                  if (!tradingEnabled || openTrades.size() >= MAX_OPEN_TRADES || consecutiveLosses >= 3) return;
+                  double pip = 0.0005;
+                  double sl = direction.equals("CALL") ? price - Math.max(pip, price*0.001) : price + Math.max(pip, price*0.001);
+                  double risk = Math.abs(price - sl);
+                  if (risk > 0.001) return;
+                  double tp = direction.equals("CALL") ? price + risk*rr : price - risk*rr;
+                  JSONObject trade = new JSONObject();
+                  try {
+                      trade.put("id", System.currentTimeMillis());
+                      trade.put("symbol", symbol);
+                      trade.put("direction", direction);
+                      trade.put("entry", price);
+                      trade.put("sl", sl);
+                      trade.put("tp", tp);
+                      trade.put("rr", rr);
+                      trade.put("current", price);
+                      trade.put("profit", 0);
+                      openTrades.add(trade);
+                      JSONObject order = new JSONObject();
+                      JSONObject params = new JSONObject();
+                      params.put("amount", 1);
+                      params.put("basis", "stake");
+                      params.put("contract_type", direction);
+                      params.put("currency", "USD");
+                      params.put("duration", 60);
+                      params.put("duration_unit", "t");
+                      params.put("symbol", symbol);
+                      params.put("barrier", direction.equals("CALL") ? String.format("%.5f", price+0.0001) : String.format("%.5f", price-0.0001));
+                      order.put("buy", 1);
+                      order.put("parameters", params);
+                      sendJson(order);
+                      // Simulate trade outcome after 60 seconds
+                      new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                          int idx = -1;
+                          for (int i=0; i<openTrades.size(); i++) {
+                              if (openTrades.get(i).optLong("id") == trade.optLong("id")) { idx = i; break; }
+                          }
+                          if (idx != -1) {
+                              JSONObject closed = openTrades.get(idx);
+                              double finalPrice = price + (Math.random() - 0.5) * 0.002;
+                              double profit = (direction.equals("CALL") ? (finalPrice - price) : (price - finalPrice)) * 10000;
+                              try {
+                                  if (profit > 0) consecutiveLosses = 0;
+                                  else { consecutiveLosses++; if (consecutiveLosses >= 3) tradingEnabled = false; }
+                                  balance += profit;
+                                  JSONObject history = new JSONObject();
+                                  history.put("time", System.currentTimeMillis());
+                                  history.put("symbol", symbol);
+                                  history.put("action", "CLOSE");
+                                  history.put("profit", profit);
+                                  tradeHistory.add(0, history);
+                                  openTrades.remove(idx);
+                                  broadcastState();
+                              } catch (Exception e) {}
+                          }
+                      }, 60000);
+                      broadcastState();
+                  } catch (Exception e) { Log.e("TradingService", "Trade error", e); }
+              }
+
+              private void subscribeToCandles() {
+                  for (String symbol : SYMBOLS) {
+                      for (int tf : GRANULARITY_MAP.keySet()) {
+                          try {
+                              JSONObject req = new JSONObject();
+                              JSONObject candles = new JSONObject();
+                              candles.put("symbol", symbol);
+                              candles.put("granularity", GRANULARITY_MAP.get(tf));
+                              candles.put("subscribe", 1);
+                              req.put("candles", candles);
+                              sendJson(req);
+                          } catch (Exception e) {}
+                      }
+                  }
+              }
+
+              private int getTimeframeFromGranularity(int granularity) {
+                  for (Map.Entry<Integer,Integer> e : GRANULARITY_MAP.entrySet())
+                      if (e.getValue() == granularity) return e.getKey();
+                  return 0;
+              }
+
+              private void broadcastState() {
+                  Intent intent = new Intent("SIMIYUFX_STATE");
+                  intent.putExtra("connected", isConnected);
+                  intent.putExtra("balance", balance);
+                  intent.putExtra("currency", currency);
+                  intent.putExtra("isVirtual", isVirtual);
+                  intent.putExtra("loginId", loginId);
+                  intent.putExtra("openTradesCount", openTrades.size());
+                  intent.putExtra("consecutiveLosses", consecutiveLosses);
+                  intent.putExtra("tradingEnabled", tradingEnabled);
+                  // Also send open trades and history as JSON strings
+                  try {
+                      intent.putExtra("openTradesJson", new JSONArray(openTrades).toString());
+                      intent.putExtra("historyJson", new JSONArray(tradeHistory).toString());
+                  } catch (Exception e) {}
+                  LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
+              }
+
+              private void reconnect() { if (!isConnected) connect(); }
+              private void connect() { if (apiToken.isEmpty()) return; webSocket = client.newWebSocket(new okhttp3.Request.Builder().url(WS_URL).build(), webSocketListener); }
+              public void setToken(String token) { this.apiToken = token; connect(); }
+              public void stopTrading() { if (webSocket != null) webSocket.close(1000, "Manual stop"); isConnected = false; }
+
+              @Override public void onCreate() { super.onCreate(); startForeground(1, createNotification()); monitorConnectivity(); }
+              private Notification createNotification() {
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel ch = new NotificationChannel("simiyufx", "SIMIYUFX Trading", NotificationManager.IMPORTANCE_LOW);
+                      getSystemService(NotificationManager.class).createNotificationChannel(ch);
+                  }
+                  return new NotificationCompat.Builder(this, "simiyufx")
+                      .setContentTitle("SIMIYUFX Bot")
+                      .setContentText("Trading in background")
+                      .setSmallIcon(android.R.drawable.ic_menu_upload).build();
+              }
+              private void monitorConnectivity() {
+                  ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+                  networkCallback = new ConnectivityManager.NetworkCallback() {
+                      @Override public void onAvailable(Network network) { if (!lastNetworkState) reconnect(); lastNetworkState = true; }
+                      @Override public void onLost(Network network) { lastNetworkState = false; }
+                  };
+                  cm.registerDefaultNetworkCallback(networkCallback);
+              }
+              @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
+              @Override public IBinder onBind(Intent intent) { return null; }
+              @Override public void onDestroy() { if (webSocket != null) webSocket.close(1000, null); if (networkCallback != null) ((ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE)).unregisterNetworkCallback(networkCallback); super.onDestroy(); }
+          }
+          EOF
+
+          # ----- MainActivity.java (clean UI, binds to service) -----
+          cat > app/src/main/java/com/simiyufx/MainActivity.java << 'EOF'
+          package com.simiyufx;
+
+          import android.content.*;
+          import android.os.*;
+          import android.widget.*;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.util.Locale;
+
+          public class MainActivity extends AppCompatActivity {
+              private TextView balanceText, accountInfoText, statusText, openTradesText, lossCountText;
+              private TextView scanningStatusText;
+              private ListView tradeListView;
+              private ArrayAdapter<String> tradeAdapter;
+              private EditText tokenInput;
+              private Button connectBtn, disconnectBtn;
+              private Intent serviceIntent;
+
+              private final BroadcastReceiver stateReceiver = new BroadcastReceiver() {
+                  @Override
+                  public void onReceive(Context context, Intent intent) {
+                      boolean connected = intent.getBooleanExtra("connected", false);
+                      double balance = intent.getDoubleExtra("balance", 0);
+                      String currency = intent.getStringExtra("currency");
+                      boolean isVirtual = intent.getBooleanExtra("isVirtual", true);
+                      String loginId = intent.getStringExtra("loginId");
+                      int openTrades = intent.getIntExtra("openTradesCount", 0);
+                      int losses = intent.getIntExtra("consecutiveLosses", 0);
+                      boolean tradingEnabled = intent.getBooleanExtra("tradingEnabled", true);
+                      String openTradesJson = intent.getStringExtra("openTradesJson");
+                      String historyJson = intent.getStringExtra("historyJson");
+
+                      balanceText.setText(String.format(Locale.US, "%.2f %s", balance, currency));
+                      accountInfoText.setText(String.format("%s | %s Account", loginId, isVirtual ? "Demo" : "Real"));
+                      statusText.setText(connected ? "● Connected" : "● Disconnected");
+                      openTradesText.setText(String.format("Open: %d", openTrades));
+                      lossCountText.setText(String.format("Losses: %d", losses));
+                      scanningStatusText.setText(tradingEnabled ? "🟢 Scanning for trades" : "🔴 Trading stopped (3 losses)");
+
+                      java.util.List<String> tradeList = new java.util.ArrayList<>();
+                      try {
+                          if (openTradesJson != null && !openTradesJson.isEmpty()) {
+                              JSONArray arr = new JSONArray(openTradesJson);
+                              for (int i=0; i<arr.length(); i++) {
+                                  JSONObject t = arr.getJSONObject(i);
+                                  tradeList.add(String.format("%s %s @ %.5f", t.getString("symbol"), t.getString("direction"), t.getDouble("entry")));
+                              }
+                          }
+                          if (historyJson != null && !historyJson.isEmpty()) {
+                              JSONArray arr = new JSONArray(historyJson);
+                              for (int i=0; i<arr.length() && tradeList.size()<20; i++) {
+                                  JSONObject h = arr.getJSONObject(i);
+                                  tradeList.add(String.format("%s %s P/L: %.2f", h.getString("symbol"), h.getString("action"), h.getDouble("profit")));
+                              }
+                          }
+                      } catch (Exception e) {}
+                      tradeAdapter.clear();
+                      tradeAdapter.addAll(tradeList);
+                  }
+              };
+
+              @Override protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+                  tokenInput = findViewById(R.id.tokenInput);
+                  connectBtn = findViewById(R.id.connectBtn);
+                  disconnectBtn = findViewById(R.id.disconnectBtn);
+                  balanceText = findViewById(R.id.balanceText);
+                  accountInfoText = findViewById(R.id.accountInfoText);
+                  statusText = findViewById(R.id.statusText);
+                  openTradesText = findViewById(R.id.openTradesText);
+                  lossCountText = findViewById(R.id.lossCountText);
+                  scanningStatusText = findViewById(R.id.scanningStatusText);
+                  tradeListView = findViewById(R.id.tradeListView);
+                  tradeAdapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1);
+                  tradeListView.setAdapter(tradeAdapter);
+                  serviceIntent = new Intent(this, TradingService.class);
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(serviceIntent);
+                  else startService(serviceIntent);
+                  LocalBroadcastManager.getInstance(this).registerReceiver(stateReceiver, new IntentFilter("SIMIYUFX_STATE"));
+                  connectBtn.setOnClickListener(v -> {
+                      String token = tokenInput.getText().toString().trim();
+                      if (!token.isEmpty()) {
+                          Intent intent = new Intent(this, TradingService.class);
+                          intent.putExtra("token", token);
+                          startService(intent);
+                          connectBtn.setEnabled(false);
+                          disconnectBtn.setEnabled(true);
+                      }
+                  });
+                  disconnectBtn.setOnClickListener(v -> {
+                      Intent intent = new Intent(this, TradingService.class);
+                      intent.putExtra("stop", true);
+                      startService(intent);
+                      connectBtn.setEnabled(true);
+                      disconnectBtn.setEnabled(false);
+                  });
+              }
+              @Override protected void onDestroy() { super.onDestroy(); LocalBroadcastManager.getInstance(this).unregisterReceiver(stateReceiver); }
+          }
+          EOF
+
+          # ----- activity_main.xml (clean layout) -----
+          cat > app/src/main/res/layout/activity_main.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="16dp"
+              android:background="#0f2027">
+              <LinearLayout android:orientation="horizontal" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical">
+                  <TextView android:text="🐉 SIMIYUFX" android:textSize="24sp" android:textColor="#ff9800" android:layout_weight="1"/>
+                  <EditText android:id="@+id/tokenInput" android:hint="API Token" android:layout_width="200dp" android:layout_height="wrap_content" android:inputType="textPassword"/>
+                  <Button android:id="@+id/connectBtn" android:text="Start" android:layout_marginStart="8dp"/>
+                  <Button android:id="@+id/disconnectBtn" android:text="Stop" android:enabled="false"/>
+              </LinearLayout>
+              <TextView android:id="@+id/balanceText" android:textSize="28sp" android:textStyle="bold" android:layout_marginTop="20dp"/>
+              <TextView android:id="@+id/accountInfoText" android:textSize="14sp"/>
+              <LinearLayout android:orientation="horizontal" android:layout_marginTop="16dp">
+                  <TextView android:id="@+id/statusText" android:layout_weight="1"/>
+                  <TextView android:id="@+id/openTradesText" android:layout_weight="1"/>
+                  <TextView android:id="@+id/lossCountText" android:layout_weight="1"/>
+              </LinearLayout>
+              <TextView android:id="@+id/scanningStatusText" android:textSize="16sp" android:layout_marginTop="16dp" android:gravity="center"/>
+              <TextView android:text="Recent Activity" android:layout_marginTop="20dp" android:textSize="18sp"/>
+              <ListView android:id="@+id/tradeListView" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:layout_marginTop="8dp"/>
+          </LinearLayout>
+          EOF
+
+          # ----- AndroidManifest.xml (with service) -----
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <application android:allowBackup="true" android:icon="@drawable/ic_launcher" android:label="SIMIYUFX" android:usesCleartextTraffic="true" android:theme="@style/Theme.AppCompat.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+                  </activity>
+                  <service android:name=".TradingService" android:exported="false" />
+              </application>
+          </manifest>
+          EOF
+
+          # ----- styles.xml -----
+          cat > app/src/main/res/values/styles.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources><style name="Theme.AppCompat.NoActionBar" parent="Theme.AppCompat.Light.NoActionBar" /></resources>
+          EOF
+
+          # ----- build.gradle (root) -----
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:8.1.0' }
+          }
+          EOF
+
+          # ----- settings.gradle -----
+          cat > settings.gradle << 'EOF'
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "SIMIYUFX"
+          include ':app'
+          EOF
+
+          # ----- app/build.gradle (with OkHttp and Gson) -----
+          cat > app/build.gradle << 'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.simiyufx'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.simiyufx"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.core:core:1.12.0'
+              implementation 'androidx.localbroadcastmanager:localbroadcastmanager:1.1.0'
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+              implementation 'com.google.code.gson:gson:2.10.1'
+          }
+          configurations.all {
+              resolutionStrategy { force 'org.jetbrains.kotlin:kotlin-stdlib:1.9.0' }
+              exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+              exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+          }
+          EOF
+
+          # ----- gradle.properties -----
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.suppressUnsupportedCompileSdk=34
+          EOF
+
+      - name: Generate Gradle Wrapper
+        run: |
+          gradle wrapper --gradle-version 8.0 --distribution-type all
+          chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIMIYUFX-Background-Trading
+          path: app/build/outputs/apk/debug/*.apk
