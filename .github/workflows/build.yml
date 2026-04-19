@@ -131,399 +131,565 @@ jobs:
 
           # ----- dashboard.html (full Liquidity Sweep + CHOCH strategy in JavaScript) -----
           cat > app/src/main/assets/dashboard.html << 'EOF'
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-              <title>SIMIYUFX | CHOCH Bot</title>
-              <style>
-                  * { margin:0; padding:0; box-sizing:border-box; }
-                  body {
-                      font-family: 'Segoe UI', system-ui;
-                      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
-                      color: #eee;
-                      padding: 20px;
-                      min-height: 100vh;
-                  }
-                  .container { max-width: 800px; margin: auto; }
-                  .header {
-                      display: flex;
-                      justify-content: space-between;
-                      align-items: center;
-                      flex-wrap: wrap;
-                      background: rgba(0,0,0,0.3);
-                      backdrop-filter: blur(8px);
-                      padding: 15px 25px;
-                      border-radius: 40px;
-                      margin-bottom: 25px;
-                  }
-                  .logo { display: flex; align-items: center; gap: 12px; font-size: 28px; font-weight: bold; }
-                  .logo span { font-size: 40px; }
-                  .token-area { display: flex; gap: 12px; flex-wrap: wrap; }
-                  input, button {
-                      padding: 10px 18px;
-                      border-radius: 40px;
-                      border: none;
-                      font-size: 14px;
-                  }
-                  input { background: #2c3e50; color: white; width: 260px; }
-                  button {
-                      background: #ff9800;
-                      color: black;
-                      font-weight: bold;
-                      cursor: pointer;
-                  }
-                  button.disconnect { background: #e74c3c; color: white; }
-                  .stats-grid {
-                      display: grid;
-                      grid-template-columns: repeat(auto-fit, minmax(180px,1fr));
-                      gap: 20px;
-                      margin-bottom: 30px;
-                  }
-                  .card {
-                      background: rgba(255,255,255,0.1);
-                      backdrop-filter: blur(8px);
-                      border-radius: 24px;
-                      padding: 18px;
-                      border: 1px solid rgba(255,255,255,0.2);
-                  }
-                  .card-title { font-size: 13px; opacity: 0.7; letter-spacing: 1px; }
-                  .card-value { font-size: 32px; font-weight: bold; color: #ff9800; }
-                  .profit { color: #2ecc71; }
-                  .loss { color: #e74c3c; }
-                  .row2 {
-                      display: grid;
-                      grid-template-columns: 1fr 1fr;
-                      gap: 25px;
-                      margin-bottom: 30px;
-                  }
-                  .panel {
-                      background: rgba(0,0,0,0.35);
-                      backdrop-filter: blur(8px);
-                      border-radius: 24px;
-                      padding: 20px;
-                  }
-                  .panel h3 { margin-bottom: 15px; }
-                  .status-led {
-                      width: 10px; height: 10px; border-radius: 50%; display: inline-block;
-                  }
-                  .green { background: #2ecc71; box-shadow: 0 0 4px #2ecc71; }
-                  .red { background: #e74c3c; }
-                  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-                  th, td { padding: 8px 6px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
-                  th { color: #ff9800; }
-                  .trade-log { max-height: 300px; overflow-y: auto; }
-              </style>
-          </head>
-          <body>
-          <div class="container">
-              <div class="header">
-                  <div class="logo"><span>🐉</span> SIMIYUFX</div>
-                  <div class="token-area">
-                      <input type="text" id="apiToken" placeholder="Deriv API token">
-                      <button id="connectBtn">Connect & Start</button>
-                      <button id="disconnectBtn" class="disconnect" style="display:none">Stop</button>
-                  </div>
-              </div>
+                            
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SIMIYUFX PRO TRADING BOT</title>
 
-              <div class="stats-grid">
-                  <div class="card"><div class="card-title">Balance</div><div class="card-value" id="balance">—</div></div>
-                  <div class="card"><div class="card-title">Equity</div><div class="card-value" id="equity">—</div></div>
-                  <div class="card"><div class="card-title">Total P&L</div><div class="card-value" id="pnl">0.00</div></div>
-                  <div class="card"><div class="card-title">Open Trades</div><div class="card-value" id="openTrades">0</div></div>
-                  <div class="card"><div class="card-title">Consecutive Losses</div><div class="card-value" id="consecutiveLosses">0</div></div>
-                  <div class="card"><div class="card-title">Connection</div><div><span class="status-led red" id="statusLed"></span> <span id="statusText">Disconnected</span></div></div>
-              </div>
+<style>
+*{
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
+  font-family:Segoe UI, sans-serif;
+}
 
-              <div class="row2">
-                  <div class="panel">
-                      <h3>📊 Open Positions</h3>
-                      <div style="max-height: 200px; overflow-y: auto;">
-                          <table id="openTradesTable">
-                              <thead><tr><th>Symbol</th><th>Type</th><th>Entry</th><th>SL</th><th>TP</th><th>Current</th><th>P/L</th></tr></thead>
-                              <tbody></tbody>
-                          </table>
-                      </div>
-                  </div>
-                  <div class="panel">
-                      <h3>📜 Trade History</h3>
-                      <div class="trade-log">
-                          <table id="historyTable">
-                              <thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Profit</th></tr></thead>
-                              <tbody></tbody>
-                          </table>
-                      </div>
-                  </div>
-              </div>
+body{
+  background:linear-gradient(135deg,#0f172a,#1e293b);
+  color:#fff;
+  min-height:100vh;
+}
 
-              <div class="panel">
-                  <h3>🧠 Strategy Engine <span id="strategyStatus" style="background:#2c3e50; padding:4px 12px; border-radius:20px; font-size:12px;">● INACTIVE</span></h3>
-                  <div style="font-size:12px;">Liquidity Sweep + CHOCH | Multi-TF (45,30,15,5m sweeps; 1,2m CHOCH) | Dynamic R:R 1:3–1:4</div>
-                  <div id="lastSignal" style="margin-top:10px; font-family:monospace; font-size:12px;"></div>
-              </div>
-          </div>
+.container{
+  max-width:1400px;
+  margin:auto;
+  padding:12px;
+}
 
-          <script>
-              // Configuration
-              const APP_ID = 1089;
-              const WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
-              const SYMBOLS = [
-                  "frxEURUSD","frxUSDJPY","frxGBPUSD","frxUSDCHF","frxUSDCAD",
-                  "frxAUDUSD","frxNZDUSD","frxEURGBP","frxEURJPY","frxEURCHF",
-                  "frxEURAUD","frxEURCAD","frxEURNZD","frxGBPJPY","frxGBPCHF",
-                  "frxGBPAUD","frxGBPCAD","frxAUDJPY","frxAUDCAD","frxNZDJPY","frxCADJPY"
-              ];
-              const TIMEFRAMES = [45,30,15,5,2,1];
-              const GRANULARITY_MAP = {1:60,2:120,5:300,15:900,30:1800,45:2700};
-              
-              let ws = null;
-              let isConnected = false;
-              let token = "";
-              let balance = 0;
-              let equity = 0;
-              let openTrades = [];
-              let tradeHistory = [];
-              let consecutiveLosses = 0;
-              let tradingEnabled = true;
-              const MAX_OPEN_TRADES = 3;
-              
-              let candleHistory = new Map();
-              let activeSweeps = new Map();
-              
-              // UI elements
-              const balanceEl = document.getElementById("balance");
-              const equityEl = document.getElementById("equity");
-              const pnlEl = document.getElementById("pnl");
-              const openTradesEl = document.getElementById("openTrades");
-              const consecutiveLossesEl = document.getElementById("consecutiveLosses");
-              const statusLed = document.getElementById("statusLed");
-              const statusText = document.getElementById("statusText");
-              const strategyStatusSpan = document.getElementById("strategyStatus");
-              const lastSignalDiv = document.getElementById("lastSignal");
-              
-              function logStatus(msg, isError = false) {
-                  statusText.innerText = msg;
-                  statusLed.className = isConnected ? "status-led green" : "status-led red";
-                  if (isError) statusText.innerText = "Error: " + msg;
-              }
-              
-              function updateUI() {
-                  balanceEl.innerText = balance.toFixed(2);
-                  equityEl.innerText = equity.toFixed(2);
-                  let totalPnl = openTrades.reduce((sum, t) => sum + (t.profit || 0), 0);
-                  pnlEl.innerText = totalPnl.toFixed(2);
-                  openTradesEl.innerText = openTrades.length;
-                  consecutiveLossesEl.innerText = consecutiveLosses;
+.header{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  background:#111827;
+  padding:12px;
+  border-radius:12px;
+}
+
+.logo{
+  font-size:18px;
+  font-weight:700;
+  color:#38bdf8;
+}
+
+.controls{
+  display:flex;
+  gap:8px;
+}
+
+input{
+  padding:8px;
+  border-radius:8px;
+  border:1px solid #334155;
+  background:#0f172a;
+  color:#fff;
+  width:200px;
+}
+
+button{
+  padding:8px 12px;
+  border-radius:8px;
+  border:none;
+  cursor:pointer;
+  font-weight:600;
+}
+
+.connect{background:#22c55e;color:#fff}
+.disconnect{background:#ef4444;color:#fff}
+
+.statusBar{
+  display:flex;
+  justify-content:space-between;
+  margin-top:10px;
+  padding:10px;
+  background:#111827;
+  border-radius:10px;
+}
+
+.badge{padding:4px 10px;border-radius:20px;font-size:12px}
+.live{background:#22c55e}
+.stop{background:#ef4444}
+.connecting{background:#f59e0b}
+
+.account{
+  margin-top:10px;
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:10px;
+}
+
+.box{
+  background:#111827;
+  padding:10px;
+  border-radius:10px;
+  text-align:center;
+}
+
+.box h4{font-size:11px;color:#94a3b8}
+.box span{font-size:16px;font-weight:700;color:#38bdf8}
+
+.grid{
+  margin-top:10px;
+  display:grid;
+  grid-template-columns:repeat(5,1fr);
+  gap:10px;
+}
+
+.card{
+  background:#111827;
+  padding:10px;
+  border-radius:10px;
+  text-align:center;
+}
+
+.card span{font-size:18px;font-weight:bold;color:#22c55e}
+
+.row{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  margin-top:10px;
+}
+
+.panel{
+  background:#111827;
+  padding:10px;
+  border-radius:10px;
+  height:260px;
+  overflow:hidden;
+}
+
+table{width:100%;font-size:11px}
+th,td{padding:5px;border-bottom:1px solid #1f2937}
+
+.profit{color:#22c55e}
+.loss{color:#ef4444}
+
+.log{
+  margin-top:10px;
+  background:#000;
+  color:#00ff88;
+  padding:10px;
+  border-radius:10px;
+  height:140px;
+  overflow:auto;
+  font-size:11px;
+}
+
+.botStatus{font-size:12px;color:#38bdf8}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="header">
+  <div class="logo">🐉 SIMIYUFX PRO BOT</div>
+
+  <div class="controls">
+    <input id="token" placeholder="Deriv API Token">
+    <button class="connect" id="connectBtn">Connect</button>
+    <button class="disconnect" id="disconnectBtn" style="display:none">Disconnect</button>
+  </div>
+</div>
+
+<div class="statusBar">
+  <div>
+    Status: <span id="status" class="badge stop">STOPPED</span>
+    <span class="botStatus" id="botState">BOT OFFLINE</span>
+  </div>
+  <div id="signal">Waiting...</div>
+</div>
+
+<div class="account">
+  <div class="box"><h4>LOGIN ID</h4><span id="login">---</span></div>
+  <div class="box"><h4>ACCOUNT TYPE</h4><span id="accType">---</span></div>
+  <div class="box"><h4>BALANCE</h4><span id="balance">0</span></div>
+  <div class="box"><h4>CURRENCY</h4><span id="currency">---</span></div>
+</div>
+
+<div class="grid">
+  <div class="card">Equity<br><span id="equity">0</span></div>
+  <div class="card">P/L<br><span id="pnl">0</span></div>
+  <div class="card">Open Trades<br><span id="open">0</span></div>
+  <div class="card">Loss Streak<br><span id="loss">0</span></div>
+  <div class="card">Active Bots<br><span>1</span></div>
+</div>
+
+<div class="row">
+
+<div class="panel">
+<h4>LIVE TRADES</h4>
+<table>
+<thead>
+<tr><th>Pair</th><th>Position</th><th>P/L</th></tr>
+</thead>
+<tbody id="live"></tbody>
+</table>
+</div>
+
+<div class="panel">
+<h4>TRADE HISTORY</h4>
+<table>
+<thead>
+<tr><th>Time</th><th>Pair</th><th>P/L</th></tr>
+</thead>
+<tbody id="history"></tbody>
+</table>
+</div>
+
+</div>
+
+<div class="log" id="log"></div>
+
+</div>
+<script>
+
+const WS = "wss://ws.derivws.com/websockets/v3?app_id=1089";
+
+const PAIRS = [
+"frxEURUSD","frxUSDJPY","frxGBPUSD","frxUSDCHF","frxUSDCAD",
+"frxAUDUSD","frxNZDUSD","frxEURGBP","frxEURJPY","frxEURCHF",
+"frxEURAUD","frxEURCAD","frxEURNZD","frxGBPJPY","frxGBPCHF",
+"frxGBPAUD","frxGBPCAD","frxAUDJPY","frxAUDCAD","frxNZDJPY","frxCADJPY"
+];
+
+const TF = {1:60,2:120,5:300,15:900,30:1800,45:2700};
+
+// ✅ FIXED CONSTANT LOT SIZE
+const LOT_SIZE = 0.01;
+
+let ws;
+let token = "";
+
+let balance = 0;
+let equity = 0;
+
+let candles = new Map();
+let sweeps = new Map();
+let trades = new Map();
+let history = [];
+
+let loss = 0;
+let activeTrades = 0;
+
+let lastPing = Date.now();
+
+let lastSymbol = null;
+let lastDirection = null;
+
+let prices = new Map();
+
+const $ = id => document.getElementById(id);
+
+function log(t){
+  $("log").innerHTML += t + "<br>";
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function setStatus(text, cls){
+  $("status").innerText = text;
+  $("status").className = "badge " + cls;
+}
+
+function setBotState(text){
+  $("botState").innerText = text;
+}
+
+function send(data){
+  if(ws && ws.readyState === 1){
+    ws.send(JSON.stringify(data));
+  }
+}
+
+/* ================= CONNECT ================= */
+function connect(t){
+  token = t;
+  ws = new WebSocket(WS);
+
+  setStatus("CONNECTING","connecting");
+  setBotState("CONNECTING...");
+
+  ws.onopen = () => {
+    send({ authorize: token });
+  };
+
+  ws.onmessage = (e) => {
+    lastPing = Date.now();
+    const d = JSON.parse(e.data);
+
+    if(d.msg_type === "error"){
+      log("ERROR: " + JSON.stringify(d.error));
+      return;
+    }
+
+    /* AUTH */
+    if(d.msg_type === "authorize"){
+      setStatus("CONNECTED","live");
+      setBotState("CONNECTED");
+
+      $("login").innerText = d.authorize.loginid || "---";
+      $("currency").innerText = d.authorize.currency || "---";
+      $("accType").innerText = d.authorize.is_virtual ? "DEMO" : "REAL";
+
+      $("connectBtn").style.display = "none";
+      $("disconnectBtn").style.display = "inline-block";
+
+      send({ balance: 1, subscribe: 1 });
+      subscribeCandles();
+      return;
+    }
+
+    /* BALANCE */
+    if(d.msg_type === "balance"){
+      balance = equity = d.balance.balance;
+      render();
+    }
+
+    /* BUY */
+    if(d.msg_type === "buy"){
+      const id = d.buy.contract_id;
+
+      let trade = {
+        id,
+        symbol: lastSymbol,
+        entry: prices.get(lastSymbol) || 0,
+        pnl: 0,
+        sl: 0,
+        tp: 0,
+        direction: lastDirection,
+        position: "OPEN"
+      };
+
+      const dist = 0.0005;
+
+      if(lastDirection === "CALL"){
+        trade.sl = trade.entry - dist;
+        trade.tp = trade.entry + dist * 3;
+      } else {
+        trade.sl = trade.entry + dist;
+        trade.tp = trade.entry - dist * 3;
+      }
+
+      trades.set(id, trade);
+      activeTrades++;
+      render();
+    }
+
+    /* CONTRACT UPDATE */
+    if(d.msg_type === "proposal_open_contract"){
+      const oc = d.proposal_open_contract;
+      if(!oc) return;
+
+      const t = trades.get(oc.contract_id);
+      if(!t) return;
+
+      t.pnl = oc.profit;
+
+      if(oc.is_sold){
+        activeTrades--;
+
+        history.push({
+          time: Date.now(),
+          symbol: t.symbol,
+          pnl: oc.profit
+        });
+
+        if(oc.profit < 0) loss++;
+        else loss = 0;
+
+        trades.delete(oc.contract_id);
+        render();
+      }
+    }
+
+    /* CANDLES */
+    if(d.msg_type === "candles"){
+      handleCandle(d.candles?.[0], d.echo_req.symbol, d.echo_req.granularity);
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus("DISCONNECTED","stop");
+    setBotState("DISCONNECTED");
+
+    $("connectBtn").style.display = "inline-block";
+    $("disconnectBtn").style.display = "none";
+
+    setTimeout(() => connect(token), 2000);
+  };
+}
+
+/* ================= CONNECTION CHECK (EVERY 2s) ================= */
+setInterval(() => {
+  if(!ws){
+    setBotState("OFFLINE");
+    return;
+  }
+
+  if(ws.readyState === 1 && Date.now() - lastPing < 5000){
+    setBotState("CONNECTED");
+  } else {
+    setBotState("RECONNECTING...");
+  }
+}, 2000);
+
+/* ================= SUBSCRIBE ================= */
+function subscribeCandles(){
+  PAIRS.forEach(symbol=>{
+    Object.values(TF).forEach(g=>{
+      send({
+        ticks_history: symbol,
+        style: "candles",
+        granularity: g,
+        count: 50,
+        end: "latest",
+        subscribe: 1
+      });
+    });
+  });
+}
+
+/* ================= CANDLE ENGINE ================= */
+function handleCandle(c, symbol, g){
+  if(!c) return;
+
+  prices.set(symbol, c.close);
+
+  const tf = Object.keys(TF).find(k => TF[k] == g);
+  if(!tf) return;
+
+  lastSymbol = symbol;
+
+  if(!candles.has(symbol)) candles.set(symbol,{});
+  const m = candles.get(symbol);
+
+  if(!m[tf]) m[tf] = [];
+  m[tf].push(c);
+
+  if(m[tf].length < 3) return;
+
+  const prev = m[tf][m[tf].length - 2];
+  const last = m[tf][m[tf].length - 1];
+
+  if([45,30,15,5].includes(+tf)){
+    if(last.high > prev.high && last.close < prev.high){
+      sweeps.set(symbol,{type:"bearish"});
+      log("Bearish sweep " + symbol);
+    }
+
+    if(last.low < prev.low && last.close > prev.low){
+      sweeps.set(symbol,{type:"bullish"});
+      log("Bullish sweep " + symbol);
+    }
+  }
+
+  if([1,2].includes(+tf)){
+    const sw = sweeps.get(symbol);
+    if(!sw || activeTrades >= 3 || loss >= 3) return;
+
+    let dir = null;
+
+    if(sw.type === "bearish" && last.close > prev.high) dir = "CALL";
+    if(sw.type === "bullish" && last.close < prev.low) dir = "PUT";
+
+    if(dir){
+      lastDirection = dir;
+
+      send({
+        proposal: 1,
+        amount: LOT_SIZE,
+        basis: "stake",
+        contract_type: dir,
+        currency: "USD",
+        duration: 1,
+        duration_unit: "m",
+        symbol
+      });
+
+      sweeps.delete(symbol);
+    }
+  }
+}
+
+/* ================= CLOSE ENGINE ================= */
+setInterval(()=>{
+  trades.forEach((t,id)=>{
+    const price = prices.get(t.symbol);
+    if(!price) return;
+
+    if(
+      (t.direction === "CALL" && (price >= t.tp || price <= t.sl)) ||
+      (t.direction === "PUT" && (price <= t.tp || price >= t.sl))
+    ){
+      closeTrade(id,t);
+    }
+  });
+},500);
+
+function closeTrade(id,t){
+  t.position = "CLOSED";
+  activeTrades--;
+
+  history.push({
+    time: Date.now(),
+    symbol: t.symbol,
+    pnl: t.pnl || 0
+  });
+
+  if((t.pnl || 0) < 0) loss++;
+  else loss = 0;
+
+  trades.delete(id);
+  render();
+}
+
+/* ================= RENDER ================= */
+function render(){
+  $("balance").innerText = balance.toFixed(2);
+  $("equity").innerText = equity.toFixed(2);
+  $("open").innerText = activeTrades;
+  $("loss").innerText = loss;
+
+  let pnl = 0;
+  trades.forEach(t => pnl += (t.pnl || 0));
+  $("pnl").innerText = pnl.toFixed(2);
+
+  let lb = $("live");
+  lb.innerHTML = "";
+
+  trades.forEach(t=>{
+    let r = lb.insertRow();
+    r.innerHTML = `<td>${t.symbol}</td><td>${t.position}</td><td class="${t.pnl>=0?'profit':'loss'}">${(t.pnl||0).toFixed(2)}</td>`;
+  });
+
+  let hb = $("history");
+  hb.innerHTML = "";
+
+  history.slice(-10).reverse().forEach(h=>{
+    let r = hb.insertRow();
+    r.innerHTML = `<td>${new Date(h.time).toLocaleTimeString()}</td><td>${h.symbol}</td><td>${(h.pnl||0).toFixed(2)}</td>`;
+  });
+}
+
+/* ================= UI ================= */
+$("connectBtn").onclick = () => {
+  const t = $("token").value.trim();
+  if(!t) return alert("Invalid token");
+  connect(t);
+};
+
+$("disconnectBtn").onclick = () => {
+  ws?.close();
+};
+</script>
+</body>
+</html>
+          
                   
-                  const tbody = document.querySelector("#openTradesTable tbody");
-                  tbody.innerHTML = "";
-                  openTrades.forEach(t => {
-                      const row = tbody.insertRow();
-                      row.insertCell(0).innerText = t.symbol;
-                      row.insertCell(1).innerText = t.direction === "CALL" ? "CALL" : "PUT";
-                      row.insertCell(2).innerText = t.entry.toFixed(5);
-                      row.insertCell(3).innerText = t.sl.toFixed(5);
-                      row.insertCell(4).innerText = t.tp.toFixed(5);
-                      row.insertCell(5).innerText = (t.current || t.entry).toFixed(5);
-                      const pnlCell = row.insertCell(6);
-                      pnlCell.innerText = (t.profit || 0).toFixed(2);
-                      pnlCell.className = (t.profit || 0) >= 0 ? "profit" : "loss";
-                  });
-                  const histBody = document.querySelector("#historyTable tbody");
-                  histBody.innerHTML = "";
-                  tradeHistory.slice().reverse().forEach(h => {
-                      const row = histBody.insertRow();
-                      row.insertCell(0).innerText = new Date(h.time).toLocaleTimeString();
-                      row.insertCell(1).innerText = h.symbol;
-                      row.insertCell(2).innerText = h.action;
-                      const profitCell = row.insertCell(3);
-                      profitCell.innerText = h.profit.toFixed(2);
-                      profitCell.className = h.profit >= 0 ? "profit" : "loss";
-                  });
-              }
-              
-              function sendRequest(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
-              
-              function subscribeToCandles() {
-                  for (let symbol of SYMBOLS) {
-                      for (let tf of TIMEFRAMES) {
-                          const granularity = GRANULARITY_MAP[tf];
-                          sendRequest({ candles: { symbol, granularity, subscribe: 1 } });
-                      }
-                  }
-              }
-              
-              function detectSweep(newCandle, prev) {
-                  if (!prev) return null;
-                  if (newCandle.high > prev.high && newCandle.close < prev.high)
-                      return { type: "bearish", level: prev.high };
-                  if (newCandle.low < prev.low && newCandle.close > prev.low)
-                      return { type: "bullish", level: prev.low };
-                  return null;
-              }
-              
-              function addSweep(symbol, tf, sweep) {
-                  if (!activeSweeps.has(symbol)) activeSweeps.set(symbol, []);
-                  let sweeps = activeSweeps.get(symbol);
-                  const now = Date.now();
-                  sweeps = sweeps.filter(s => (now - s.timestamp) < (s.timeframe * 60 * 1000 * 5));
-                  sweeps.push({ timeframe: tf, type: sweep.type, priceLevel: sweep.level, timestamp: now });
-                  const highest = sweeps.reduce((max, s) => s.timeframe > max.timeframe ? s : max, sweeps[0]);
-                  activeSweeps.set(symbol, sweeps.filter(s => s.timeframe === highest.timeframe));
-              }
-              
-              function checkCHOCH(symbol, execTF, candles) {
-                  if (candles.length < 3) return null;
-                  const sweeps = activeSweeps.get(symbol);
-                  if (!sweeps || sweeps.length === 0) return null;
-                  const sweep = sweeps[0];
-                  const prev = candles[candles.length-2];
-                  const prevPrev = candles[candles.length-3];
-                  const current = candles[candles.length-1];
-                  
-                  let chochValid = false;
-                  let direction = "";
-                  if (sweep.type === "bearish") {
-                      if (current.low > prev.low && current.close > prev.high) chochValid = true;
-                      else if (current.close > Math.max(prev.high, prevPrev.high)) chochValid = true;
-                      if (chochValid) direction = "CALL";
-                  } else if (sweep.type === "bullish") {
-                      if (current.high < prev.high && current.close < prev.low) chochValid = true;
-                      else if (current.close < Math.min(prev.low, prevPrev.low)) chochValid = true;
-                      if (chochValid) direction = "PUT";
-                  }
-                  if (chochValid) {
-                      let rr = 3.0;
-                      if (sweep.timeframe >= 30) rr = 4.0;
-                      else if (sweep.timeframe === 15) rr = (execTF === 1) ? 4.0 : 3.0;
-                      else if (sweep.timeframe === 5) rr = (execTF === 1) ? 3.0 : 3.5;
-                      return { direction, rr, sweepLevel: sweep.priceLevel };
-                  }
-                  return null;
-              }
-              
-              function executeTrade(symbol, direction, rr, price) {
-                  if (!tradingEnabled || openTrades.length >= MAX_OPEN_TRADES || consecutiveLosses >= 3) return;
-                  const pip = 0.0005;
-                  const sl = direction === "CALL" ? price - Math.max(pip, price*0.001) : price + Math.max(pip, price*0.001);
-                  const risk = Math.abs(price - sl);
-                  if (risk > 0.001) return;
-                  const tp = direction === "CALL" ? price + risk*rr : price - risk*rr;
-                  
-                  const barrier = direction === "CALL" ? (price + 0.0001).toFixed(5) : (price - 0.0001).toFixed(5);
-                  sendRequest({
-                      buy: 1,
-                      parameters: {
-                          amount: 1,
-                          basis: "stake",
-                          contract_type: direction,
-                          currency: "USD",
-                          duration: 60,
-                          duration_unit: "t",
-                          symbol: symbol,
-                          barrier: barrier
-                      }
-                  });
-                  
-                  const tradeId = Date.now();
-                  const newTrade = { id: tradeId, symbol, direction, entry: price, sl, tp, rr, current: price, profit: 0 };
-                  openTrades.push(newTrade);
-                  updateUI();
-                  lastSignalDiv.innerText = `✅ ${direction} on ${symbol} @ ${price.toFixed(5)} | SL:${sl.toFixed(5)} TP:${tp.toFixed(5)} R:R ${rr}:1`;
-                  
-                  setTimeout(() => {
-                      const idx = openTrades.findIndex(t => t.id === tradeId);
-                      if (idx !== -1) {
-                          const closed = openTrades[idx];
-                          const finalPrice = price + (Math.random() - 0.5) * 0.002;
-                          const profit = (closed.direction === "CALL" ? (finalPrice - closed.entry) : (closed.entry - finalPrice)) * 10000;
-                          if (profit > 0) consecutiveLosses = 0;
-                          else { consecutiveLosses++; if (consecutiveLosses >= 3) tradingEnabled = false; }
-                          balance += profit;
-                          equity = balance;
-                          tradeHistory.push({ time: Date.now(), symbol: closed.symbol, action: "CLOSE", profit: profit });
-                          openTrades.splice(idx,1);
-                          updateUI();
-                          lastSignalDiv.innerText += `\n🔚 Trade closed P/L: ${profit.toFixed(2)}`;
-                      }
-                  }, 60000);
-              }
-              
-              function handleMessage(data) {
-                  if (data.error) { logStatus(data.error.message, true); return; }
-                  if (data.msg_type === "authorize") {
-                      isConnected = true;
-                      balance = data.authorize.balance;
-                      equity = data.authorize.balance;
-                      updateUI();
-                      logStatus("Connected & Strategy Active");
-                      strategyStatusSpan.innerText = "● ACTIVE";
-                      subscribeToCandles();
-                  }
-                  else if (data.msg_type === "candle") {
-                      const candle = data.candle;
-                      const symbol = candle.symbol;
-                      const granularity = candle.granularity;
-                      let tf = null;
-                      for (let [key, val] of Object.entries(GRANULARITY_MAP)) {
-                          if (val === granularity) { tf = parseInt(key); break; }
-                      }
-                      if (!tf) return;
-                      const newCandle = { open: candle.open, high: candle.high, low: candle.low, close: candle.close, epoch: candle.epoch };
-                      if (!candleHistory.has(symbol)) candleHistory.set(symbol, new Map());
-                      const tfMap = candleHistory.get(symbol);
-                      if (!tfMap.has(tf)) tfMap.set(tf, []);
-                      const candles = tfMap.get(tf);
-                      candles.push(newCandle);
-                      if (candles.length > 100) candles.shift();
-                      
-                      if ([45,30,15,5].includes(tf) && candles.length >= 2) {
-                          const prev = candles[candles.length-2];
-                          const sweep = detectSweep(newCandle, prev);
-                          if (sweep) {
-                              addSweep(symbol, tf, sweep);
-                              lastSignalDiv.innerText = `🔄 Sweep detected on ${symbol} ${tf}m (${sweep.type}) @ ${sweep.level.toFixed(5)}`;
-                          }
-                      }
-                      if ([1,2].includes(tf) && candles.length >= 3) {
-                          const choch = checkCHOCH(symbol, tf, candles);
-                          if (choch) {
-                              const currentPrice = newCandle.close;
-                              executeTrade(symbol, choch.direction, choch.rr, currentPrice);
-                              activeSweeps.delete(symbol);
-                          }
-                      }
-                  }
-              }
-              
-              function connect(tokenValue) {
-                  if (ws) ws.close();
-                  ws = new WebSocket(WS_URL);
-                  ws.onopen = () => { sendRequest({ authorize: tokenValue }); };
-                  ws.onmessage = (e) => { const data = JSON.parse(e.data); handleMessage(data); };
-                  ws.onclose = () => { isConnected = false; logStatus("Disconnected"); strategyStatusSpan.innerText = "● INACTIVE"; };
-                  ws.onerror = (err) => { logStatus("WebSocket error", true); };
-              }
-              
-              document.getElementById("connectBtn").onclick = () => {
-                  const tokenInput = document.getElementById("apiToken").value.trim();
-                  if (!tokenInput) { alert("Enter Deriv API token"); return; }
-                  token = tokenInput;
-                  connect(token);
-                  document.getElementById("connectBtn").style.display = "none";
-                  document.getElementById("disconnectBtn").style.display = "inline-block";
-              };
-              document.getElementById("disconnectBtn").onclick = () => {
-                  if (ws) ws.close();
-                  isConnected = false;
-                  document.getElementById("connectBtn").style.display = "inline-block";
-                  document.getElementById("disconnectBtn").style.display = "none";
-                  strategyStatusSpan.innerText = "● INACTIVE";
-              };
-          </script>
-          </body>
-          </html>
           EOF
 
           # ----- styles.xml -----
